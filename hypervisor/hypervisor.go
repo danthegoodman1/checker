@@ -7,9 +7,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/danthegoodman1/checker/gologger"
 	"github.com/danthegoodman1/checker/http_server"
 	"github.com/danthegoodman1/checker/runtime"
 )
+
+var logger = gologger.NewLogger()
 
 // Hypervisor is the main service that manages job definitions and job lifecycle.
 type Hypervisor struct {
@@ -199,6 +202,42 @@ func (h *Hypervisor) Spawn(ctx context.Context, opts SpawnOptions) (string, erro
 
 	runner := NewJobRunner(job, jd, rt, jd.Config)
 
+	// Set up retry callback
+	runner.SetOnFailure(func(r *JobRunner, exitCode int) {
+		job, _ := r.GetState(context.Background())
+		maxRetries := 0
+		var retryDelay time.Duration
+		if jd.RetryPolicy != nil {
+			maxRetries = jd.RetryPolicy.MaxRetries
+			if jd.RetryPolicy.RetryDelay != "" {
+				retryDelay, _ = time.ParseDuration(jd.RetryPolicy.RetryDelay)
+			}
+		}
+
+		if job.RetryCount < maxRetries {
+			r.logger.Debug().
+				Int("exit_code", exitCode).
+				Int("retry_count", job.RetryCount+1).
+				Int("max_retries", maxRetries).
+				Dur("retry_delay", retryDelay).
+				Msg("retrying failed job")
+
+			if retryDelay > 0 {
+				time.Sleep(retryDelay)
+			}
+			if err := r.Retry(); err != nil {
+				r.logger.Error().Err(err).Msg("failed to retry job")
+				r.MarkDone()
+			}
+		} else {
+			r.logger.Debug().
+				Int("exit_code", exitCode).
+				Int("retry_count", job.RetryCount).
+				Msg("job failed, no retries remaining")
+			r.MarkDone()
+		}
+	})
+
 	h.runnersMu.Lock()
 	h.runners[jobID] = runner
 	h.runnersMu.Unlock()
@@ -346,6 +385,44 @@ func (h *Hypervisor) GetParams(ctx context.Context, jobID string) (json.RawMessa
 	}
 
 	return job.Params, nil
+}
+
+// JobMetadata contains metadata about a job that the runtime can access.
+type JobMetadata struct {
+	JobID              string `json:"job_id"`
+	DefinitionName     string `json:"definition_name"`
+	DefinitionVersion  string `json:"definition_version"`
+	RetryCount         int    `json:"retry_count"`
+	LastCheckpointAtMs *int64 `json:"last_checkpoint_at_ms"`
+}
+
+// GetJobMetadata retrieves metadata about a job for the runtime.
+// Called via runtime API
+func (h *Hypervisor) GetJobMetadata(ctx context.Context, jobID string) (*JobMetadata, error) {
+	h.runnersMu.RLock()
+	runner, exists := h.runners[jobID]
+	h.runnersMu.RUnlock()
+
+	if !exists {
+		return nil, fmt.Errorf("job %q not found", jobID)
+	}
+
+	job, err := runner.GetState(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	meta := &JobMetadata{
+		JobID:             job.ID,
+		DefinitionName:    job.DefinitionName,
+		DefinitionVersion: job.DefinitionVersion,
+		RetryCount:        job.RetryCount,
+	}
+	if job.LastCheckpointAt != nil {
+		ms := job.LastCheckpointAt.UnixMilli()
+		meta.LastCheckpointAtMs = &ms
+	}
+	return meta, nil
 }
 
 // ListJobs returns all active jobs.

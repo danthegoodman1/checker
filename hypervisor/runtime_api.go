@@ -15,6 +15,7 @@ func (h *Hypervisor) RegisterRuntimeAPI(e *echo.Echo) {
 	e.DELETE("/jobs/:id/lock/:lockId", h.handleReleaseJobLock)
 	e.POST("/jobs/:id/exit", h.handleExit)
 	e.GET("/jobs/:id/params", h.handleGetParams)
+	e.GET("/jobs/:id/metadata", h.handleGetMetadata)
 }
 
 type CheckpointJobRequest struct {
@@ -124,4 +125,22 @@ func (h *Hypervisor) handleGetParams(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, params)
+}
+
+type GetMetadataRequest struct {
+	ID string `param:"id" validate:"required"`
+}
+
+func (h *Hypervisor) handleGetMetadata(c echo.Context) error {
+	var req GetMetadataRequest
+	if err := http_server.ValidateRequest(c, &req); err != nil {
+		return err
+	}
+
+	metadata, err := h.GetJobMetadata(c.Request().Context(), req.ID)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+
+	return c.JSON(http.StatusOK, metadata)
 }

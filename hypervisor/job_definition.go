@@ -9,6 +9,16 @@ import (
 // VersionLatest is a special version string that refers to the latest registered version.
 const VersionLatest = "@latest"
 
+// RetryPolicy defines how a job should be retried on failure.
+type RetryPolicy struct {
+	// MaxRetries is the maximum number of retry attempts. 0 means no retries.
+	MaxRetries int `json:"max_retries"`
+
+	// RetryDelay is the duration to wait before retrying (e.g. "1s", "500ms").
+	// If empty, retries immediately.
+	RetryDelay string `json:"retry_delay"`
+}
+
 // JobDefinition represents a registered job definition.
 // A job definition defines what to run (runtime type, configuration) and is referenced by name and version.
 type JobDefinition struct {
@@ -23,6 +33,9 @@ type JobDefinition struct {
 	// For NodeJS, this would be *nodejs.Config.
 	// The hypervisor passes this to the runtime when starting a job.
 	Config any
+
+	// RetryPolicy defines retry behavior on failure. Nil means no retries.
+	RetryPolicy *RetryPolicy
 
 	// Metadata holds arbitrary key-value metadata for the job definition.
 	Metadata map[string]string

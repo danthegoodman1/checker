@@ -42,13 +42,23 @@ async function getParams() {
   return resp.json()
 }
 
+async function getMetadata() {
+  const resp = await fetch(`http://${apiUrl}/jobs/${jobId}/metadata`)
+  if (!resp.ok) {
+    throw new Error(`Get metadata failed: ${resp.status} ${await resp.text()}`)
+  }
+  return resp.json()
+}
+
 async function main() {
   const params = await getParams()
+  const metadata = await getMetadata()
   console.log("Received params:", JSON.stringify(params))
+  console.log("Received metadata:", JSON.stringify(metadata))
 
-  // Check for crash simulation
-  if (params.crash === "before_checkpoint") {
-    console.log("Simulating crash before checkpoint...")
+  // Check for crash simulation - only crash if retry_count is 0
+  if (params.crash === "before_checkpoint" && metadata.retry_count === 0) {
+    console.log("Simulating crash before checkpoint (retry_count=0)...")
     nonExistentFunction()
   }
 
@@ -60,8 +70,8 @@ async function main() {
   const checkpointResult = await checkpoint()
   console.log("Checkpoint complete:", JSON.stringify(checkpointResult))
 
-  if (params.crash === "after_checkpoint") {
-    console.log("Simulating crash after checkpoint...")
+  if (params.crash === "after_checkpoint" && metadata.retry_count === 0) {
+    console.log("Simulating crash after checkpoint (retry_count=0)...")
     nonExistentFunction()
   }
 

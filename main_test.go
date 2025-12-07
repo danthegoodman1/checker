@@ -58,19 +58,16 @@ func setupTest(t *testing.T) *testEnv {
 	cwd, err := os.Getwd()
 	require.NoError(t, err)
 
-	env := &testEnv{
+	return &testEnv{
 		t:          t,
 		h:          h,
 		baseURL:    fmt.Sprintf("http://%s", callerAddr),
 		client:     &http.Client{Timeout: 30 * time.Second},
 		workerPath: filepath.Join(cwd, "demo", "worker.js"),
 	}
-
-	env.registerWorker()
-	return env
 }
 
-func (e *testEnv) registerWorker() {
+func (e *testEnv) registerWorker(retryPolicy *hypervisor.RetryPolicy) {
 	cwd, _ := os.Getwd()
 	registerReq := map[string]any{
 		"name":         "test-worker",
@@ -80,6 +77,9 @@ func (e *testEnv) registerWorker() {
 			"entry_point": e.workerPath,
 			"work_dir":    filepath.Join(cwd, "demo"),
 		},
+	}
+	if retryPolicy != nil {
+		registerReq["retry_policy"] = retryPolicy
 	}
 	registerBody, _ := json.Marshal(registerReq)
 	resp, err := e.client.Post(e.baseURL+"/definitions", "application/json", bytes.NewReader(registerBody))
@@ -138,6 +138,7 @@ func (e *testEnv) getJob(jobID string) map[string]any {
 
 func TestRunJSWorkerViaHTTPAPI(t *testing.T) {
 	env := setupTest(t)
+	env.registerWorker(nil)
 
 	jobID := env.spawnJob(map[string]any{"test": true})
 	t.Logf("Spawned job: %s", jobID)
@@ -151,8 +152,9 @@ func TestRunJSWorkerViaHTTPAPI(t *testing.T) {
 	t.Logf("Job checkpoint count: %v", job["CheckpointCount"])
 }
 
-func TestWorkerCrashBeforeCheckpoint(t *testing.T) {
+func TestWorkerCrashNoRetry(t *testing.T) {
 	env := setupTest(t)
+	env.registerWorker(nil) // No retry policy
 
 	jobID := env.spawnJob(map[string]any{"crash": "before_checkpoint"})
 	t.Logf("Spawned crashing job: %s", jobID)
@@ -162,19 +164,39 @@ func TestWorkerCrashBeforeCheckpoint(t *testing.T) {
 	t.Logf("Crashed job exit code: %d", result.ExitCode)
 
 	job := env.getJob(jobID)
-	assert.Equal(t, float64(0), job["CheckpointCount"], "expected 0 checkpoints before crash")
+	assert.Equal(t, float64(0), job["CheckpointCount"], "expected 0 checkpoints")
+	assert.Equal(t, float64(0), job["RetryCount"], "expected 0 retries")
 }
 
-func TestWorkerCrashAfterCheckpoint(t *testing.T) {
+func TestWorkerCrashWithRetry(t *testing.T) {
 	env := setupTest(t)
+	env.registerWorker(&hypervisor.RetryPolicy{MaxRetries: 1})
 
-	jobID := env.spawnJob(map[string]any{"crash": "after_checkpoint"})
-	t.Logf("Spawned crashing job: %s", jobID)
+	jobID := env.spawnJob(map[string]any{"crash": "before_checkpoint"})
+	t.Logf("Spawned crashing job with retry: %s", jobID)
 
 	result := env.waitForResult(jobID)
-	assert.NotEqual(t, 0, result.ExitCode, "expected non-zero exit code for crash")
-	t.Logf("Crashed job exit code: %d", result.ExitCode)
+	assert.Equal(t, 0, result.ExitCode, "expected success after retry")
+	t.Logf("Job completed with exit code: %d, output: %s", result.ExitCode, string(result.Output))
 
 	job := env.getJob(jobID)
-	assert.Equal(t, float64(1), job["CheckpointCount"], "expected 1 checkpoint before crash")
+	assert.Equal(t, float64(1), job["RetryCount"], "expected 1 retry")
+	assert.Equal(t, float64(1), job["CheckpointCount"], "expected 1 checkpoint after successful retry")
+}
+
+func TestWorkerCrashAfterCheckpointWithRetry(t *testing.T) {
+	env := setupTest(t)
+	env.registerWorker(&hypervisor.RetryPolicy{MaxRetries: 1})
+
+	jobID := env.spawnJob(map[string]any{"crash": "after_checkpoint"})
+	t.Logf("Spawned crashing job with retry: %s", jobID)
+
+	result := env.waitForResult(jobID)
+	assert.Equal(t, 0, result.ExitCode, "expected success after retry")
+	t.Logf("Job completed with exit code: %d, output: %s", result.ExitCode, string(result.Output))
+
+	job := env.getJob(jobID)
+	assert.Equal(t, float64(1), job["RetryCount"], "expected 1 retry")
+	// First run: checkpoint then crash. Second run: checkpoint then success = 2 checkpoints total
+	assert.Equal(t, float64(2), job["CheckpointCount"], "expected 2 checkpoints (1 per attempt)")
 }

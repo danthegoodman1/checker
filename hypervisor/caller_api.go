@@ -27,6 +27,7 @@ type RegisterJobDefinitionRequest struct {
 	Version     string              `json:"version" validate:"required"`
 	RuntimeType runtime.RuntimeType `json:"runtime_type" validate:"required"`
 	Config      json.RawMessage     `json:"config" validate:"required"`
+	RetryPolicy *RetryPolicy        `json:"retry_policy"`
 	Metadata    map[string]string   `json:"metadata"`
 }
 
@@ -51,6 +52,7 @@ func (h *Hypervisor) handleRegisterJobDefinition(c echo.Context) error {
 		Version:     req.Version,
 		RuntimeType: req.RuntimeType,
 		Config:      config,
+		RetryPolicy: req.RetryPolicy,
 		Metadata:    req.Metadata,
 	}
 

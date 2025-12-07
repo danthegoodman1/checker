@@ -70,6 +70,9 @@ type Job struct {
 	// LastCheckpointAt is when the last checkpoint occurred.
 	LastCheckpointAt *time.Time
 
+	// RetryCount tracks how many times this job has been retried.
+	RetryCount int
+
 	// SuspendUntil is set when the job is suspended and should wake at this time.
 	SuspendUntil *time.Time
 

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/danthegoodman1/checker/runtime"
+	"github.com/rs/zerolog"
 )
 
 // JobRunner manages the lifecycle of a single job.
@@ -19,6 +20,7 @@ type JobRunner struct {
 	process    runtime.Process
 	checkpoint runtime.Checkpoint // Last checkpoint, used for restore
 	config     any
+	logger     zerolog.Logger // Per-runner logger with job context
 
 	// Done channel signals when the job has terminated
 	doneChan chan struct{}
@@ -41,6 +43,9 @@ type JobRunner struct {
 	// Context for cancellation
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	// onFailure is called when the job fails, allowing retry logic
+	onFailure func(runner *JobRunner, exitCode int)
 }
 
 // NewJobRunner creates a new actor for a job.
@@ -52,6 +57,7 @@ func NewJobRunner(job *Job, definition *JobDefinition, rt runtime.Runtime, confi
 		definition:  definition,
 		rt:          rt,
 		config:      config,
+		logger:      logger.With().Str("job_id", job.ID).Logger(),
 		doneChan:    make(chan struct{}),
 		activeLocks: make(map[string]time.Time),
 		ctx:         ctx,
@@ -83,12 +89,38 @@ func (r *JobRunner) Start() error {
 	return nil
 }
 
+// Retry restarts the job with incremented retry count.
+func (r *JobRunner) Retry() error {
+	r.jobMu.Lock()
+	r.job.RetryCount++
+	r.job.State = JobStatePending
+	r.job.Error = ""
+	r.job.Result = nil
+	r.job.CompletedAt = nil
+	r.jobMu.Unlock()
+
+	return r.Start()
+}
+
+// SetOnFailure sets the callback for when the job fails.
+func (r *JobRunner) SetOnFailure(fn func(runner *JobRunner, exitCode int)) {
+	r.onFailure = fn
+}
+
+// MarkDone closes the done channel and notifies waiters.
+func (r *JobRunner) MarkDone() {
+	r.doneOnce.Do(func() {
+		close(r.doneChan)
+		r.notifyWaiters()
+	})
+}
+
 // waitForExit waits for the process to exit and updates state accordingly.
 func (r *JobRunner) waitForExit() {
 	exitCode, err := r.process.Wait(r.ctx)
 
 	r.jobMu.Lock()
-	// Only update if not already terminal (could have been killed)
+	// Only update if not already terminal (could have been killed or exited via API)
 	if !r.job.IsTerminal() {
 		now := time.Now()
 		r.job.CompletedAt = &now
@@ -102,20 +134,21 @@ func (r *JobRunner) waitForExit() {
 			r.job.Result = &JobResult{ExitCode: exitCode}
 		} else {
 			r.job.State = JobStateCompleted
-			r.job.Result = &JobResult{ExitCode: 0}
+			if r.job.Result == nil {
+				r.job.Result = &JobResult{ExitCode: 0}
+			}
 		}
 	}
+	failed := r.job.State == JobStateFailed
 	r.jobMu.Unlock()
 
-	r.markDone()
-}
+	// Call failure callback before marking done (allows retry)
+	if failed && r.onFailure != nil {
+		r.onFailure(r, exitCode)
+		return // onFailure decides whether to markDone
+	}
 
-// markDone closes the done channel and notifies waiters.
-func (r *JobRunner) markDone() {
-	r.doneOnce.Do(func() {
-		close(r.doneChan)
-		r.notifyWaiters()
-	})
+	r.MarkDone()
 }
 
 // notifyWaiters signals all result waiters that the job has completed.
@@ -201,7 +234,7 @@ func (r *JobRunner) Kill(ctx context.Context) (*Job, error) {
 	result := r.job.Clone()
 	r.jobMu.Unlock()
 
-	r.markDone()
+	r.MarkDone()
 
 	return result, nil
 }
@@ -215,7 +248,12 @@ func (r *JobRunner) Exit(ctx context.Context, exitCode int, output json.RawMessa
 		return fmt.Errorf("job has already terminated")
 	}
 
-	r.job.State = JobStateCompleted
+	if exitCode == 0 {
+		r.job.State = JobStateCompleted
+	} else {
+		r.job.State = JobStateFailed
+		r.job.Error = fmt.Sprintf("exit code %d", exitCode)
+	}
 	r.job.Result = &JobResult{
 		ExitCode: exitCode,
 		Output:   output,
@@ -223,7 +261,7 @@ func (r *JobRunner) Exit(ctx context.Context, exitCode int, output json.RawMessa
 	now := time.Now()
 	r.job.CompletedAt = &now
 
-	// Don't call markDone here - waitForExit will handle it when process actually exits
+	// Don't call MarkDone here - waitForExit will handle it when process actually exits
 	return nil
 }
 
