@@ -106,7 +106,7 @@ func (e *testEnv) registerWorker(retryPolicy *hypervisor.RetryPolicy) {
 }
 
 func (e *testEnv) registerDockerWorker(retryPolicy *hypervisor.RetryPolicy) {
-	e.registerWorkerWithConfig("test-worker", "1.0.0", runtime.RuntimeTypeDocker, map[string]any{
+	e.registerWorkerWithConfig("test-docker-worker", "1.0.0", runtime.RuntimeTypeDocker, map[string]any{
 		"image": "checker-worker-test:latest",
 	}, retryPolicy)
 }
@@ -128,9 +128,9 @@ func (e *testEnv) registerWorkerWithConfig(name, version string, runtimeType run
 	require.Equal(e.t, http.StatusCreated, resp.StatusCode)
 }
 
-func (e *testEnv) spawnJob(params map[string]any) string {
+func (e *testEnv) spawnJob(definitionName string, params map[string]any) string {
 	spawnReq := map[string]any{
-		"definition_name":    "test-worker",
+		"definition_name":    definitionName,
 		"definition_version": "1.0.0",
 		"params":             params,
 	}
@@ -184,7 +184,7 @@ func TestRunJSWorkerViaHTTPAPI(t *testing.T) {
 	// Worker adds 1 then doubles: (5 + 1) * 2 = 12
 	expectedResult := (inputNumber + 1) * 2
 
-	jobID := env.spawnJob(map[string]any{"number": inputNumber})
+	jobID := env.spawnJob("test-worker", map[string]any{"number": inputNumber})
 	t.Logf("Spawned job: %s", jobID)
 
 	result := env.waitForResult(jobID)
@@ -210,7 +210,7 @@ func TestWorkerCrashNoRetry(t *testing.T) {
 	env := setupTest(t)
 	env.registerWorker(nil) // No retry policy
 
-	jobID := env.spawnJob(map[string]any{"crash": "before_checkpoint"})
+	jobID := env.spawnJob("test-worker", map[string]any{"crash": "before_checkpoint"})
 	t.Logf("Spawned crashing job: %s", jobID)
 
 	result := env.waitForResult(jobID)
@@ -226,7 +226,7 @@ func TestWorkerCrashWithRetry(t *testing.T) {
 	env := setupTest(t)
 	env.registerWorker(&hypervisor.RetryPolicy{MaxRetries: 1})
 
-	jobID := env.spawnJob(map[string]any{"crash": "before_checkpoint"})
+	jobID := env.spawnJob("test-worker", map[string]any{"crash": "before_checkpoint"})
 	t.Logf("Spawned crashing job with retry: %s", jobID)
 
 	result := env.waitForResult(jobID)
@@ -242,7 +242,7 @@ func TestWorkerCrashAfterCheckpointWithRetry(t *testing.T) {
 	env := setupTest(t)
 	env.registerWorker(&hypervisor.RetryPolicy{MaxRetries: 1})
 
-	jobID := env.spawnJob(map[string]any{"crash": "after_checkpoint"})
+	jobID := env.spawnJob("test-worker", map[string]any{"crash": "after_checkpoint"})
 	t.Logf("Spawned crashing job with retry: %s", jobID)
 
 	result := env.waitForResult(jobID)
@@ -259,7 +259,7 @@ func TestWorkerCrashExhaustsRetries(t *testing.T) {
 	env := setupTest(t)
 	env.registerWorker(&hypervisor.RetryPolicy{MaxRetries: 2})
 
-	jobID := env.spawnJob(map[string]any{"crash": "always"})
+	jobID := env.spawnJob("test-worker", map[string]any{"crash": "always"})
 	t.Logf("Spawned always-crashing job: %s", jobID)
 
 	result := env.waitForResult(jobID)
@@ -281,7 +281,7 @@ func TestDockerWorker(t *testing.T) {
 	// Worker adds 1 then doubles: (7 + 1) * 2 = 16
 	expectedResult := (inputNumber + 1) * 2
 
-	jobID := env.spawnJob(map[string]any{"number": inputNumber})
+	jobID := env.spawnJob("test-docker-worker", map[string]any{"number": inputNumber})
 	t.Logf("Spawned Docker job: %s", jobID)
 
 	result := env.waitForResult(jobID)
