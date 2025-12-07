@@ -177,7 +177,6 @@ func (h *Hypervisor) Spawn(ctx context.Context, opts SpawnOptions) (string, erro
 	env["CHECKER_JOB_ID"] = jobID
 	env["CHECKER_JOB_DEFINITION_NAME"] = jd.Name
 	env["CHECKER_JOB_DEFINITION_VERSION"] = jd.Version
-	env["CHECKER_API_URL"] = h.runtimeHTTPAddress
 
 	job := &Job{
 		ID:                jobID,
@@ -200,7 +199,7 @@ func (h *Hypervisor) Spawn(ctx context.Context, opts SpawnOptions) (string, erro
 		}
 	}
 
-	runner := NewJobRunner(job, jd, rt, jd.Config)
+	runner := NewJobRunner(job, jd, rt, jd.Config, h.runtimeHTTPAddress)
 
 	// Set up retry callback
 	runner.SetOnFailure(func(r *JobRunner, exitCode int) {

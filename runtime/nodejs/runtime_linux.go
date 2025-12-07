@@ -23,10 +23,11 @@ type Runtime struct {
 
 // checkpoint holds the data needed to restore a process on Linux.
 type checkpoint struct {
-	executionID   string
-	env           map[string]string
-	checkpointDir string
-	config        *Config
+	executionID    string
+	env            map[string]string
+	checkpointDir  string
+	config         *Config
+	apiHostAddress string
 }
 
 func (c *checkpoint) String() string {
@@ -35,12 +36,13 @@ func (c *checkpoint) String() string {
 
 // processHandle holds information about a running NodeJS process on Linux.
 type processHandle struct {
-	executionID   string
-	env           map[string]string
-	pid           int
-	cmd           *exec.Cmd
-	config        *Config
-	checkpointDir string
+	executionID    string
+	env            map[string]string
+	pid            int
+	cmd            *exec.Cmd
+	config         *Config
+	checkpointDir  string
+	apiHostAddress string
 }
 
 func (h *processHandle) String() string {
@@ -73,10 +75,11 @@ func (h *processHandle) Checkpoint(ctx context.Context, keepRunning bool) (runti
 		h.executionID, h.pid, keepRunning, h.checkpointDir)
 
 	return &checkpoint{
-		executionID:   h.executionID,
-		env:           h.env,
-		checkpointDir: h.checkpointDir,
-		config:        h.config,
+		executionID:    h.executionID,
+		env:            h.env,
+		checkpointDir:  h.checkpointDir,
+		config:         h.config,
+		apiHostAddress: h.apiHostAddress,
 	}, nil
 }
 
@@ -137,15 +140,15 @@ func (r *Runtime) ParseConfig(raw []byte) (any, error) {
 	return &cfg, nil
 }
 
-func (r *Runtime) Start(ctx context.Context, executionID string, env map[string]string, config any) (runtime.Process, error) {
-	cfg, ok := config.(*Config)
+func (r *Runtime) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Process, error) {
+	cfg, ok := opts.Config.(*Config)
 	if !ok {
-		return nil, fmt.Errorf("invalid config type: expected *nodejs.Config, got %T", config)
+		return nil, fmt.Errorf("invalid config type: expected *nodejs.Config, got %T", opts.Config)
 	}
 
 	checkpointDir := cfg.CheckpointDir
 	if checkpointDir == "" {
-		checkpointDir = filepath.Join(os.TempDir(), "checker", "checkpoints", executionID)
+		checkpointDir = filepath.Join(os.TempDir(), "checker", "checkpoints", opts.ExecutionID)
 	}
 
 	// Ensure checkpoint directory exists
@@ -153,7 +156,7 @@ func (r *Runtime) Start(ctx context.Context, executionID string, env map[string]
 		return nil, fmt.Errorf("failed to create checkpoint directory: %w", err)
 	}
 
-	return r.startProcess(ctx, executionID, env, cfg, checkpointDir)
+	return r.startProcess(ctx, opts.ExecutionID, opts.Env, cfg, checkpointDir, opts.APIHostAddress)
 }
 
 // Uses CRIU to restore the NodeJS process from a checkpoint.
@@ -183,10 +186,10 @@ func (r *Runtime) Restore(ctx context.Context, chk runtime.Checkpoint) (runtime.
 
 	// TODO: Actually restore with CRIU and get the new PID
 	// For now, just restart the process as a stub
-	return r.startProcess(ctx, c.executionID, c.env, c.config, c.checkpointDir)
+	return r.startProcess(ctx, c.executionID, c.env, c.config, c.checkpointDir, c.apiHostAddress)
 }
 
-func (r *Runtime) startProcess(ctx context.Context, executionID string, env map[string]string, cfg *Config, checkpointDir string) (runtime.Process, error) {
+func (r *Runtime) startProcess(ctx context.Context, executionID string, env map[string]string, cfg *Config, checkpointDir string, apiHostAddress string) (runtime.Process, error) {
 	nodePath := cfg.NodePath
 	if nodePath == "" {
 		nodePath = "node"
@@ -206,7 +209,9 @@ func (r *Runtime) startProcess(ctx context.Context, executionID string, env map[
 	cmd.Stdout = os.Stdout // TODO: capture output properly
 	cmd.Stderr = os.Stderr
 
-	// Set up environment from hypervisor
+	// Set up environment
+	// For nodejs running directly on host, the API URL is the same as the host address
+	cmd.Env = append(cmd.Env, fmt.Sprintf("CHECKER_API_URL=%s", apiHostAddress))
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
 	}
@@ -221,12 +226,13 @@ func (r *Runtime) startProcess(ctx context.Context, executionID string, env map[
 	}
 
 	handle := &processHandle{
-		executionID:   executionID,
-		env:           env,
-		pid:           cmd.Process.Pid,
-		cmd:           cmd,
-		config:        cfg,
-		checkpointDir: checkpointDir,
+		executionID:    executionID,
+		env:            env,
+		pid:            cmd.Process.Pid,
+		cmd:            cmd,
+		config:         cfg,
+		checkpointDir:  checkpointDir,
+		apiHostAddress: apiHostAddress,
 	}
 
 	return handle, nil

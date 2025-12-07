@@ -7,8 +7,8 @@ type RuntimeType string
 
 const (
 	RuntimeTypeNodeJS RuntimeType = "nodejs"
+	RuntimeTypeDocker RuntimeType = "docker"
 	// Future runtime types:
-	// RuntimeTypeDocker     RuntimeType = "docker"
 	// RuntimeTypeFirecracker RuntimeType = "firecracker"
 	// RuntimeTypeBubblewrap RuntimeType = "bubblewrap"
 )
@@ -40,6 +40,24 @@ type Process interface {
 	Wait(ctx context.Context) (exitCode int, err error)
 }
 
+// StartOptions contains parameters for starting a new process.
+type StartOptions struct {
+	// ExecutionID is a unique identifier for this execution (e.g., job ID).
+	ExecutionID string
+
+	// Env contains environment variables to pass to the process.
+	// These are user/job-defined variables, not internal runtime config.
+	Env map[string]string
+
+	// Config is runtime-specific configuration (e.g., *nodejs.Config, *docker.Config).
+	Config any
+
+	// APIHostAddress is the host:port where the runtime API is listening.
+	// The runtime is responsible for making this accessible to the process
+	// (e.g., Docker will rewrite 127.0.0.1 to host.docker.internal).
+	APIHostAddress string
+}
+
 // Runtime is a factory that creates Process instances.
 // Each runtime type (NodeJS, Docker, etc.) implements this interface, with
 // platform-specific implementations (Linux with CRIU, macOS with no-ops, etc.)
@@ -50,11 +68,9 @@ type Runtime interface {
 	// ParseConfig parses runtime-specific config from JSON.
 	ParseConfig(raw []byte) (any, error)
 
-	// Start launches a new execution with the given config.
+	// Start launches a new execution with the given options.
 	// Returns a Process that can be used for subsequent operations.
-	// The env parameter contains environment variables set by the hypervisor.
-	// The config parameter is runtime-specific (e.g., NodeJSConfig for nodejs).
-	Start(ctx context.Context, executionID string, env map[string]string, config any) (Process, error)
+	Start(ctx context.Context, opts StartOptions) (Process, error)
 
 	// Restore resumes an execution from a checkpoint.
 	// Returns a new Process representing the restored execution.

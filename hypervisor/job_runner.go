@@ -13,14 +13,15 @@ import (
 
 // JobRunner manages the lifecycle of a single job.
 type JobRunner struct {
-	job        *Job
-	jobMu      sync.RWMutex // Protects job state
-	definition *JobDefinition
-	rt         runtime.Runtime
-	process    runtime.Process
-	checkpoint runtime.Checkpoint // Last checkpoint, used for restore
-	config     any
-	logger     zerolog.Logger // Per-runner logger with job context
+	job            *Job
+	jobMu          sync.RWMutex // Protects job state
+	definition     *JobDefinition
+	rt             runtime.Runtime
+	process        runtime.Process
+	checkpoint     runtime.Checkpoint // Last checkpoint, used for restore
+	config         any
+	apiHostAddress string         // Host:port for the runtime API
+	logger         zerolog.Logger // Per-runner logger with job context
 
 	// Done channel signals when the job has terminated
 	doneChan chan struct{}
@@ -49,24 +50,30 @@ type JobRunner struct {
 }
 
 // NewJobRunner creates a new actor for a job.
-func NewJobRunner(job *Job, definition *JobDefinition, rt runtime.Runtime, config any) *JobRunner {
+func NewJobRunner(job *Job, definition *JobDefinition, rt runtime.Runtime, config any, apiHostAddress string) *JobRunner {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &JobRunner{
-		job:         job,
-		definition:  definition,
-		rt:          rt,
-		config:      config,
-		logger:      logger.With().Str("job_id", job.ID).Logger(),
-		doneChan:    make(chan struct{}),
-		activeLocks: make(map[string]time.Time),
-		ctx:         ctx,
-		cancel:      cancel,
+		job:            job,
+		definition:     definition,
+		rt:             rt,
+		config:         config,
+		apiHostAddress: apiHostAddress,
+		logger:         logger.With().Str("job_id", job.ID).Logger(),
+		doneChan:       make(chan struct{}),
+		activeLocks:    make(map[string]time.Time),
+		ctx:            ctx,
+		cancel:         cancel,
 	}
 }
 
 func (r *JobRunner) Start() error {
-	process, err := r.rt.Start(r.ctx, r.job.ID, r.job.Env, r.config)
+	process, err := r.rt.Start(r.ctx, runtime.StartOptions{
+		ExecutionID:    r.job.ID,
+		Env:            r.job.Env,
+		Config:         r.config,
+		APIHostAddress: r.apiHostAddress,
+	})
 	if err != nil {
 		r.jobMu.Lock()
 		r.job.State = JobStateFailed

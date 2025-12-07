@@ -22,9 +22,10 @@ type Runtime struct{}
 // checkpoint holds the data needed to restore a process on macOS.
 // Since CRIU isn't available, this just stores enough to fake a restore.
 type checkpoint struct {
-	executionID string
-	env         map[string]string
-	config      *Config
+	executionID    string
+	env            map[string]string
+	config         *Config
+	apiHostAddress string
 }
 
 func (c *checkpoint) String() string {
@@ -33,10 +34,11 @@ func (c *checkpoint) String() string {
 
 // processHandle holds information about a running NodeJS process on macOS.
 type processHandle struct {
-	executionID string
-	env         map[string]string
-	cmd         *exec.Cmd
-	config      *Config
+	executionID    string
+	env            map[string]string
+	cmd            *exec.Cmd
+	config         *Config
+	apiHostAddress string
 }
 
 func (h *processHandle) String() string {
@@ -52,9 +54,10 @@ func (h *processHandle) Checkpoint(ctx context.Context, keepRunning bool) (runti
 	fmt.Printf("[darwin] checkpoint requested for %s (keepRunning=%v) - no-op (CRIU not available on macOS)\n", h.executionID, keepRunning)
 
 	return &checkpoint{
-		executionID: h.executionID,
-		env:         h.env,
-		config:      h.config,
+		executionID:    h.executionID,
+		env:            h.env,
+		config:         h.config,
+		apiHostAddress: h.apiHostAddress,
 	}, nil
 }
 
@@ -113,13 +116,13 @@ func (r *Runtime) ParseConfig(raw []byte) (any, error) {
 	return &cfg, nil
 }
 
-func (r *Runtime) Start(ctx context.Context, executionID string, env map[string]string, config any) (runtime.Process, error) {
-	cfg, ok := config.(*Config)
+func (r *Runtime) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Process, error) {
+	cfg, ok := opts.Config.(*Config)
 	if !ok {
-		return nil, fmt.Errorf("invalid config type: expected *nodejs.Config, got %T", config)
+		return nil, fmt.Errorf("invalid config type: expected *nodejs.Config, got %T", opts.Config)
 	}
 
-	return r.startProcess(ctx, executionID, env, cfg)
+	return r.startProcess(ctx, opts.ExecutionID, opts.Env, cfg, opts.APIHostAddress)
 }
 
 // On macOS, this just restarts the process since CRIU is not available.
@@ -131,10 +134,10 @@ func (r *Runtime) Restore(ctx context.Context, chk runtime.Checkpoint) (runtime.
 
 	fmt.Printf("[darwin] restore requested for %s - no-op (restarting process, CRIU not available on macOS)\n", c.executionID)
 
-	return r.startProcess(ctx, c.executionID, c.env, c.config)
+	return r.startProcess(ctx, c.executionID, c.env, c.config, c.apiHostAddress)
 }
 
-func (r *Runtime) startProcess(ctx context.Context, executionID string, env map[string]string, cfg *Config) (runtime.Process, error) {
+func (r *Runtime) startProcess(ctx context.Context, executionID string, env map[string]string, cfg *Config, apiHostAddress string) (runtime.Process, error) {
 	nodePath := cfg.NodePath
 	if nodePath == "" {
 		nodePath = "node"
@@ -154,7 +157,9 @@ func (r *Runtime) startProcess(ctx context.Context, executionID string, env map[
 	cmd.Stdout = os.Stdout // TODO: capture output properly
 	cmd.Stderr = os.Stderr
 
-	// Set up environment from hypervisor
+	// Set up environment
+	// For nodejs running directly on host, the API URL is the same as the host address
+	cmd.Env = append(cmd.Env, fmt.Sprintf("CHECKER_API_URL=%s", apiHostAddress))
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
 	}
@@ -164,10 +169,11 @@ func (r *Runtime) startProcess(ctx context.Context, executionID string, env map[
 	}
 
 	handle := &processHandle{
-		executionID: executionID,
-		env:         env,
-		cmd:         cmd,
-		config:      cfg,
+		executionID:    executionID,
+		env:            env,
+		cmd:            cmd,
+		config:         cfg,
+		apiHostAddress: apiHostAddress,
 	}
 
 	return handle, nil

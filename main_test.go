@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/danthegoodman1/checker/hypervisor"
 	"github.com/danthegoodman1/checker/runtime"
+	"github.com/danthegoodman1/checker/runtime/docker"
 	"github.com/danthegoodman1/checker/runtime/nodejs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -34,7 +36,7 @@ type testEnv struct {
 	workerPath string
 }
 
-func setupTest(t *testing.T) *testEnv {
+func setupTestBase(t *testing.T) *testEnv {
 	port := portCounter.Add(2)
 	callerAddr := fmt.Sprintf("127.0.0.1:%d", port)
 	runtimeAddr := fmt.Sprintf("127.0.0.1:%d", port+1)
@@ -45,13 +47,10 @@ func setupTest(t *testing.T) *testEnv {
 	})
 
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		assert.NoError(t, h.Shutdown(ctx))
 	})
-
-	nodeRuntime := nodejs.NewRuntime()
-	require.NoError(t, h.RegisterRuntime(nodeRuntime))
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -62,21 +61,62 @@ func setupTest(t *testing.T) *testEnv {
 		t:          t,
 		h:          h,
 		baseURL:    fmt.Sprintf("http://%s", callerAddr),
-		client:     &http.Client{Timeout: 30 * time.Second},
+		client:     &http.Client{Timeout: 60 * time.Second},
 		workerPath: filepath.Join(cwd, "demo", "worker.js"),
 	}
 }
 
+func setupTest(t *testing.T) *testEnv {
+	env := setupTestBase(t)
+	nodeRuntime := nodejs.NewRuntime()
+	require.NoError(t, env.h.RegisterRuntime(nodeRuntime))
+	return env
+}
+
+func setupDockerTest(t *testing.T) *testEnv {
+	env := setupTestBase(t)
+
+	// Build the Docker image from the demo directory
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	demoDir := filepath.Join(cwd, "demo")
+
+	cmd := exec.Command("docker", "build", "-t", "checker-worker-test:latest", demoDir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Skipf("Skipping Docker test: failed to build image: %v\n%s", err, output)
+	}
+
+	dockerRuntime, err := docker.NewRuntime()
+	if err != nil {
+		t.Skipf("Skipping Docker test: %v", err)
+	}
+	t.Cleanup(func() {
+		dockerRuntime.Close()
+	})
+	require.NoError(t, env.h.RegisterRuntime(dockerRuntime))
+	return env
+}
+
 func (e *testEnv) registerWorker(retryPolicy *hypervisor.RetryPolicy) {
-	cwd, _ := os.Getwd()
+	e.registerWorkerWithConfig("test-worker", "1.0.0", runtime.RuntimeTypeNodeJS, map[string]any{
+		"entry_point": e.workerPath,
+		"work_dir":    filepath.Dir(e.workerPath),
+	}, retryPolicy)
+}
+
+func (e *testEnv) registerDockerWorker(retryPolicy *hypervisor.RetryPolicy) {
+	e.registerWorkerWithConfig("test-worker", "1.0.0", runtime.RuntimeTypeDocker, map[string]any{
+		"image": "checker-worker-test:latest",
+	}, retryPolicy)
+}
+
+func (e *testEnv) registerWorkerWithConfig(name, version string, runtimeType runtime.RuntimeType, config map[string]any, retryPolicy *hypervisor.RetryPolicy) {
 	registerReq := map[string]any{
-		"name":         "test-worker",
-		"version":      "1.0.0",
-		"runtime_type": runtime.RuntimeTypeNodeJS,
-		"config": map[string]any{
-			"entry_point": e.workerPath,
-			"work_dir":    filepath.Join(cwd, "demo"),
-		},
+		"name":         name,
+		"version":      version,
+		"runtime_type": runtimeType,
+		"config":       config,
 	}
 	if retryPolicy != nil {
 		registerReq["retry_policy"] = retryPolicy
@@ -140,12 +180,26 @@ func TestRunJSWorkerViaHTTPAPI(t *testing.T) {
 	env := setupTest(t)
 	env.registerWorker(nil)
 
-	jobID := env.spawnJob(map[string]any{"test": true})
+	inputNumber := 5
+	// Worker adds 1 then doubles: (5 + 1) * 2 = 12
+	expectedResult := (inputNumber + 1) * 2
+
+	jobID := env.spawnJob(map[string]any{"number": inputNumber})
 	t.Logf("Spawned job: %s", jobID)
 
 	result := env.waitForResult(jobID)
 	assert.Equal(t, 0, result.ExitCode)
 	t.Logf("Job completed with exit code: %d, output: %s", result.ExitCode, string(result.Output))
+
+	var output struct {
+		Result struct {
+			Step  int `json:"step"`
+			Value int `json:"value"`
+		} `json:"result"`
+	}
+	require.NoError(t, json.Unmarshal(result.Output, &output))
+	assert.Equal(t, expectedResult, output.Result.Value, "expected (input + 1) * 2")
+	t.Logf("Input: %d, Output: %d", inputNumber, output.Result.Value)
 
 	job := env.getJob(jobID)
 	assert.Equal(t, float64(1), job["CheckpointCount"])
@@ -215,4 +269,36 @@ func TestWorkerCrashExhaustsRetries(t *testing.T) {
 	job := env.getJob(jobID)
 	assert.Equal(t, float64(2), job["RetryCount"], "expected 2 retries (exhausted)")
 	assert.Equal(t, "failed", job["State"], "expected failed state")
+}
+
+// TestDockerWorker tests running a worker inside a Docker container.
+// Requires: docker build -t checker-worker-test:latest ./demo
+func TestDockerWorker(t *testing.T) {
+	env := setupDockerTest(t)
+	env.registerDockerWorker(nil)
+
+	inputNumber := 7
+	// Worker adds 1 then doubles: (7 + 1) * 2 = 16
+	expectedResult := (inputNumber + 1) * 2
+
+	jobID := env.spawnJob(map[string]any{"number": inputNumber})
+	t.Logf("Spawned Docker job: %s", jobID)
+
+	result := env.waitForResult(jobID)
+	assert.Equal(t, 0, result.ExitCode)
+	t.Logf("Docker job completed with exit code: %d, output: %s", result.ExitCode, string(result.Output))
+
+	var output struct {
+		Result struct {
+			Step  int `json:"step"`
+			Value int `json:"value"`
+		} `json:"result"`
+	}
+	require.NoError(t, json.Unmarshal(result.Output, &output))
+	assert.Equal(t, expectedResult, output.Result.Value, "expected (input + 1) * 2")
+	t.Logf("Input: %d, Output: %d", inputNumber, output.Result.Value)
+
+	job := env.getJob(jobID)
+	assert.Equal(t, float64(1), job["CheckpointCount"])
+	t.Logf("Docker job checkpoint count: %v", job["CheckpointCount"])
 }

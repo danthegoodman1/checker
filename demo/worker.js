@@ -68,8 +68,9 @@ async function main() {
     nonExistentFunction()
   }
 
-  console.log("Step 1: Starting work...")
-  const step1Result = { step: 1, value: 2 + 2 }
+  const inputNumber = params.number ?? 0
+  console.log("Step 1: Adding 1 to input...")
+  const step1Result = { step: 1, value: inputNumber + 1 }
   console.log("Step 1 complete:", step1Result)
 
   console.log("Checkpointing...")
@@ -81,7 +82,7 @@ async function main() {
     nonExistentFunction()
   }
 
-  console.log("Step 2: Continuing after checkpoint...")
+  console.log("Step 2: Doubling the value...")
   const step2Result = { step: 2, value: step1Result.value * 2 }
   console.log("Step 2 complete:", step2Result)
 
