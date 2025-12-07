@@ -15,7 +15,10 @@ import (
 
 func main() {
 	// Create the hypervisor
-	h := hypervisor.New(nil)
+	h := hypervisor.New(hypervisor.Config{
+		CallerHTTPAddress:  "0.0.0.0:8080",
+		RuntimeHTTPAddress: "0.0.0.0:8081",
+	})
 
 	// Register the NodeJS runtime
 	// The nodejs.NewRuntime() call is platform-specific:

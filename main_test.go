@@ -15,7 +15,10 @@ import (
 
 func TestRunJSWorker(t *testing.T) {
 	// Create the hypervisor
-	h := hypervisor.New(nil)
+	h := hypervisor.New(hypervisor.Config{
+		CallerHTTPAddress:  "0.0.0.0:8080",
+		RuntimeHTTPAddress: "0.0.0.0:8081",
+	})
 
 	// Register the NodeJS runtime
 	nodeRuntime := nodejs.NewRuntime()
@@ -104,7 +107,10 @@ process.exit(1);
 	}
 
 	// Create the hypervisor
-	h := hypervisor.New(nil)
+	h := hypervisor.New(hypervisor.Config{
+		CallerHTTPAddress:  "0.0.0.0:8080",
+		RuntimeHTTPAddress: "0.0.0.0:8081",
+	})
 
 	// Register the NodeJS runtime
 	nodeRuntime := nodejs.NewRuntime()

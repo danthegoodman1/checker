@@ -7,7 +7,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/danthegoodman1/checker/http_server"
 	"github.com/danthegoodman1/checker/runtime"
+	"github.com/labstack/echo/v4"
 )
 
 // Hypervisor is the main service that manages job definitions and job lifecycle.
@@ -22,12 +24,16 @@ type Hypervisor struct {
 	// ID generator function
 	generateID func() string
 
-	// APIAddress is the HTTP address for the hypervisor API
-	apiAddress string
-
 	// Context for managing lifecycle
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	callerHTTPAddress  string
+	runtimeHTTPAddress string
+
+	// HTTP Servers
+	callerHTTPServer  *http_server.HTTPServer
+	runtimeHTTPServer *http_server.HTTPServer
 }
 
 // Config holds configuration options for creating a Hypervisor.
@@ -36,13 +42,14 @@ type Config struct {
 	// If nil, a default UUID-like generator is used.
 	IDGenerator func() string
 
-	// APIAddress is the HTTP address for the hypervisor API.
-	// This is passed to jobs so they can call back to the hypervisor.
-	APIAddress string
+	// HTTP Addresses for the hypervisor API.
+	// These are passed to the hypervisor so it can start HTTP servers.
+	CallerHTTPAddress  string
+	RuntimeHTTPAddress string
 }
 
 // New creates a new Hypervisor instance.
-func New(cfg *Config) *Hypervisor {
+func New(cfg Config) *Hypervisor {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	h := &Hypervisor{
@@ -53,15 +60,21 @@ func New(cfg *Config) *Hypervisor {
 		cancel:      cancel,
 	}
 
-	if cfg != nil && cfg.IDGenerator != nil {
+	if cfg.IDGenerator != nil {
 		h.generateID = cfg.IDGenerator
 	} else {
 		h.generateID = defaultIDGenerator()
 	}
 
-	if cfg != nil {
-		h.apiAddress = cfg.APIAddress
-	}
+	h.callerHTTPAddress = cfg.CallerHTTPAddress
+	h.runtimeHTTPAddress = cfg.RuntimeHTTPAddress
+
+	h.callerHTTPServer = http_server.StartHTTPServer(h.callerHTTPAddress, "", func(e *echo.Echo) {
+		// TODO: register handlers
+	})
+	h.runtimeHTTPServer = http_server.StartHTTPServer(h.runtimeHTTPAddress, "", func(e *echo.Echo) {
+		// TODO: register handlers
+	})
 
 	return h
 }
@@ -166,9 +179,7 @@ func (h *Hypervisor) Spawn(ctx context.Context, opts SpawnOptions) (string, erro
 	env["CHECKER_JOB_ID"] = jobID
 	env["CHECKER_JOB_DEFINITION_NAME"] = jd.Name
 	env["CHECKER_JOB_DEFINITION_VERSION"] = jd.Version
-	if h.apiAddress != "" {
-		env["CHECKER_API_URL"] = h.apiAddress
-	}
+	env["CHECKER_API_URL"] = h.runtimeHTTPAddress
 
 	job := &Job{
 		ID:                jobID,
@@ -363,6 +374,10 @@ func (h *Hypervisor) ListJobs(ctx context.Context) ([]*Job, error) {
 // Shutdown gracefully shuts down the hypervisor.
 func (h *Hypervisor) Shutdown(ctx context.Context) error {
 	h.cancel()
+
+	// Stop HTTP servers
+	h.callerHTTPServer.Shutdown(ctx)
+	h.runtimeHTTPServer.Shutdown(ctx)
 
 	// Stop all actors
 	h.runnersMu.RLock()

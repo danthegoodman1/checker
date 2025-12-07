@@ -59,7 +59,6 @@ func StartHTTPServer(tcpAddr string, quicAddr string, registerRoutes func(*echo.
 	s.Echo.Validator = &CustomValidator{validator: validator.New()}
 	s.Echo.HTTPErrorHandler = customHTTPErrorHandler
 
-	// technical - no auth
 	s.Echo.GET("/hc", s.HealthCheck)
 	registerRoutes(s.Echo)
 
