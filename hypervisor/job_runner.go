@@ -20,8 +20,8 @@ type JobRunner struct {
 	process        runtime.Process
 	checkpoint     runtime.Checkpoint // Last checkpoint, used for restore
 	config         any
-	apiHostAddress string         // Host:port for the runtime API
-	logger         zerolog.Logger // Per-runner logger with job context
+	apiHostAddress string
+	logger         zerolog.Logger
 
 	// Done channel signals when the job has terminated
 	doneChan chan struct{}
@@ -49,7 +49,6 @@ type JobRunner struct {
 	onFailure func(runner *JobRunner, exitCode int)
 }
 
-// NewJobRunner creates a new actor for a job.
 func NewJobRunner(job *Job, definition *JobDefinition, rt runtime.Runtime, config any, apiHostAddress string) *JobRunner {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -90,7 +89,6 @@ func (r *JobRunner) Start() error {
 	r.job.State = JobStateRunning
 	r.jobMu.Unlock()
 
-	// Start a goroutine to wait for process exit
 	go r.waitForExit()
 
 	return nil
