@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -98,6 +99,12 @@ func (h *processHandle) Wait(ctx context.Context) (int, error) {
 	}
 
 	return 0, nil
+}
+
+func (h *processHandle) Logs(ctx context.Context) (io.ReadCloser, io.ReadCloser, error) {
+	// NodeJS runtime currently pipes directly to os.Stdout/os.Stderr
+	// Logs are not captured separately
+	return nil, nil, nil
 }
 
 // NewRuntime creates a new NodeJS runtime for macOS.

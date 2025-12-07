@@ -11,9 +11,14 @@ const spawnedAt = process.env.CHECKER_JOB_SPAWNED_AT
 const arch = process.env.CHECKER_ARCH || "unknown"
 const os = process.env.CHECKER_OS || "unknown"
 
+// Node.js detected values
+const nodeArch = process.arch // e.g., 'x64', 'arm64'
+const nodePlatform = process.platform // e.g., 'linux', 'darwin', 'win32'
+
 console.log(
-  `Worker starting... Job ID: ${jobId}, Definition: ${defName}@${defVersion} on ${os} ${arch}`
+  `Worker starting... Job ID: ${jobId}, Definition: ${defName}@${defVersion}`
 )
+console.log(`  Hypervisor: ${os}/${arch}, Worker: ${nodePlatform}/${nodeArch}`)
 
 async function checkpoint(suspendDuration) {
   const body = suspendDuration ? { suspend_duration: suspendDuration } : {}

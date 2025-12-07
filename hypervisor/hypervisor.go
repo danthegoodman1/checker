@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	goruntime "runtime"
 	"sync"
 	"time"
@@ -441,6 +442,21 @@ func (h *Hypervisor) GetJobMetadata(ctx context.Context, jobID string) (*JobMeta
 		meta.LastCheckpointAtMs = &ms
 	}
 	return meta, nil
+}
+
+// GetJobLogs returns the stdout and stderr log streams for a job.
+// The caller is responsible for closing the readers when done.
+// Returns nil, nil, nil if the job is not found or logs are not available.
+func (h *Hypervisor) GetJobLogs(ctx context.Context, jobID string) (stdout io.ReadCloser, stderr io.ReadCloser, err error) {
+	h.runnersMu.RLock()
+	runner, exists := h.runners[jobID]
+	h.runnersMu.RUnlock()
+
+	if !exists {
+		return nil, nil, fmt.Errorf("job %q not found", jobID)
+	}
+
+	return runner.Logs(ctx)
 }
 
 // ListJobs returns all active jobs.

@@ -183,6 +183,54 @@ func (e *testEnv) getJob(jobID string) map[string]any {
 	return job
 }
 
+// streamLogs starts streaming stdout and stderr logs for a job to t.Log.
+// Returns a cancel function to stop streaming.
+func (e *testEnv) streamLogs(jobID string) context.CancelFunc {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	stdout, stderr, err := e.h.GetJobLogs(ctx, jobID)
+	if err != nil {
+		e.t.Logf("Failed to get logs for job %s: %v", jobID, err)
+		return cancel
+	}
+
+	// Stream stdout
+	if stdout != nil {
+		go func() {
+			defer stdout.Close()
+			buf := make([]byte, 1024)
+			for {
+				n, err := stdout.Read(buf)
+				if n > 0 {
+					e.t.Logf("[%s stdout] %s", jobID[:8], string(buf[:n]))
+				}
+				if err != nil {
+					return
+				}
+			}
+		}()
+	}
+
+	// Stream stderr
+	if stderr != nil {
+		go func() {
+			defer stderr.Close()
+			buf := make([]byte, 1024)
+			for {
+				n, err := stderr.Read(buf)
+				if n > 0 {
+					e.t.Logf("[%s stderr] %s", jobID[:8], string(buf[:n]))
+				}
+				if err != nil {
+					return
+				}
+			}
+		}()
+	}
+
+	return cancel
+}
+
 func TestRunJSWorkerViaHTTPAPI(t *testing.T) {
 	env := setupTest(t)
 	env.registerWorker(nil)
@@ -291,6 +339,10 @@ func TestDockerWorker(t *testing.T) {
 	jobID := env.spawnJob("test-docker-worker", map[string]any{"number": inputNumber})
 	t.Logf("Spawned Docker job: %s", jobID)
 
+	// Stream logs from the container
+	cancelLogs := env.streamLogs(jobID)
+	defer cancelLogs()
+
 	result := env.waitForResult(jobID)
 	assert.Equal(t, 0, result.ExitCode)
 	t.Logf("Docker job completed with exit code: %d, output: %s", result.ExitCode, string(result.Output))
@@ -330,6 +382,10 @@ func TestDockerCheckpointRestore(t *testing.T) {
 		"checkpoint_suspend_duration":    "4s",
 	})
 	t.Logf("Spawned Docker checkpoint/restore job: %s", jobID)
+
+	// Stream logs from the container
+	cancelLogs := env.streamLogs(jobID)
+	defer cancelLogs()
 
 	result := env.waitForResult(jobID)
 	assert.Equal(t, 0, result.ExitCode)

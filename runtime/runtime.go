@@ -1,6 +1,9 @@
 package runtime
 
-import "context"
+import (
+	"context"
+	"io"
+)
 
 // RuntimeType identifies the type of runtime (nodejs, docker, firecracker, etc.)
 type RuntimeType string
@@ -44,6 +47,11 @@ type Process interface {
 	// Wait blocks until the process exits and returns the exit code.
 	// Returns an error if the process cannot be waited on.
 	Wait(ctx context.Context) (exitCode int, err error)
+
+	// Logs returns separate io.ReadClosers for stdout and stderr streams.
+	// The caller is responsible for closing both readers when done.
+	// Either reader may be nil if that stream is not available.
+	Logs(ctx context.Context) (stdout io.ReadCloser, stderr io.ReadCloser, err error)
 }
 
 // StartOptions contains parameters for starting a new process.

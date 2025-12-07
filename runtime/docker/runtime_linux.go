@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
 	"github.com/rs/zerolog"
 
@@ -137,6 +139,35 @@ func (h *processHandle) Wait(ctx context.Context) (int, error) {
 	}
 
 	return -1, fmt.Errorf("unexpected wait state")
+}
+
+func (h *processHandle) Logs(ctx context.Context) (io.ReadCloser, io.ReadCloser, error) {
+	h.logger.Debug().Msg("fetching container logs")
+
+	// Get multiplexed log stream from Docker
+	logReader, err := h.client.ContainerLogs(ctx, h.containerID, container.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Follow:     true,
+		Timestamps: false,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get container logs: %w", err)
+	}
+
+	// Create pipes for demultiplexed stdout and stderr
+	stdoutReader, stdoutWriter := io.Pipe()
+	stderrReader, stderrWriter := io.Pipe()
+
+	// Demultiplex the Docker log stream in a goroutine
+	go func() {
+		defer logReader.Close()
+		defer stdoutWriter.Close()
+		defer stderrWriter.Close()
+		_, _ = stdcopy.StdCopy(stdoutWriter, stderrWriter, logReader)
+	}()
+
+	return stdoutReader, stderrReader, nil
 }
 
 // NewRuntime creates a new Docker runtime for Linux.

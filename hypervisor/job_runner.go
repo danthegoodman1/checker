@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -416,6 +417,15 @@ func (r *JobRunner) WaitForResult() <-chan struct{} {
 // Done returns a channel that is closed when the actor terminates.
 func (r *JobRunner) Done() <-chan struct{} {
 	return r.doneChan
+}
+
+// Logs returns separate io.ReadClosers for stdout and stderr from the process.
+// Returns nil, nil, nil if the process is not running or logs are not available.
+func (r *JobRunner) Logs(ctx context.Context) (io.ReadCloser, io.ReadCloser, error) {
+	if r.process == nil {
+		return nil, nil, nil
+	}
+	return r.process.Logs(ctx)
 }
 
 // Stop gracefully stops the actor.
