@@ -35,7 +35,9 @@ async function checkpoint(suspendDuration) {
   // If the server specifies a grace period, wait for it before returning.
   // This ensures the worker is idle (not making progress) when the container is stopped.
   if (result.grace_period_ms && result.grace_period_ms > 0) {
-    console.log(`Waiting ${result.grace_period_ms}ms grace period before checkpoint completes...`)
+    console.log(
+      `Waiting ${result.grace_period_ms}ms grace period before checkpoint completes...`
+    )
     await new Promise((resolve) => setTimeout(resolve, result.grace_period_ms))
   }
 
@@ -84,7 +86,9 @@ async function main() {
 
   // Always crash mode - crashes on every attempt (for testing retry exhaustion)
   if (params.crash === "always") {
-    console.log(`Simulating crash (always mode, retry_count=${metadata.retry_count})...`)
+    console.log(
+      `Simulating crash (always mode, retry_count=${metadata.retry_count})...`
+    )
     nonExistentFunction()
   }
 
@@ -104,7 +108,9 @@ async function main() {
       console.log(
         `Time-based checkpoint: now=${nowSeconds}, spawnedAt=${spawnedAt}, cutoff=${cutoffTime}, calling checkpoint with suspend`
       )
-      const checkpointResult = await checkpoint(params.checkpoint_suspend_duration || "2s")
+      const checkpointResult = await checkpoint(
+        params.checkpoint_suspend_duration || "2s"
+      )
       console.log("Checkpoint complete:", JSON.stringify(checkpointResult))
     } else {
       console.log(
