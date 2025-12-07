@@ -56,10 +56,6 @@ func (h *Hypervisor) handleCheckpointJob(c echo.Context) error {
 		return err
 	}
 
-	// Small delay to ensure the response is fully flushed over the network
-	// before we stop the container
-	time.Sleep(50 * time.Millisecond)
-
 	// Now perform the actual checkpoint (this may stop the container on darwin).
 	// Use a background context since the request context will be cancelled after we return.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
