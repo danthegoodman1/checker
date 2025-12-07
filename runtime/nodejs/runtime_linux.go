@@ -123,6 +123,11 @@ func (h *processHandle) Wait(ctx context.Context) (int, error) {
 	return 0, nil
 }
 
+func (h *processHandle) Cleanup(ctx context.Context) error {
+	// No cleanup needed for nodejs processes - they're just OS processes
+	return nil
+}
+
 // NewRuntime creates a new NodeJS runtime for Linux.
 func NewRuntime() *Runtime {
 	return &Runtime{

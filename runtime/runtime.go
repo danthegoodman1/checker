@@ -47,6 +47,10 @@ type Process interface {
 	// Wait blocks until the process exits and returns the exit code.
 	// Returns an error if the process cannot be waited on.
 	Wait(ctx context.Context) (exitCode int, err error)
+
+	// Cleanup releases any resources held by the process (e.g., removes containers).
+	// Called by the job runner after the process has exited.
+	Cleanup(ctx context.Context) error
 }
 
 // StartOptions contains parameters for starting a new process.

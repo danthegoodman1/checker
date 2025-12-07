@@ -141,6 +141,20 @@ func (h *processHandle) Wait(ctx context.Context) (int, error) {
 	return -1, fmt.Errorf("unexpected wait state")
 }
 
+func (h *processHandle) Cleanup(ctx context.Context) error {
+	h.logger.Debug().Msg("removing container")
+
+	err := h.client.ContainerRemove(ctx, h.containerID, container.RemoveOptions{
+		Force: true,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to remove container: %w", err)
+	}
+
+	h.logger.Debug().Msg("container removed")
+	return nil
+}
+
 // NewRuntime creates a new Docker runtime for Linux.
 func NewRuntime() (*Runtime, error) {
 	logger := gologger.NewLogger().With().

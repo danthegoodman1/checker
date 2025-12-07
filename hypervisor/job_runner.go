@@ -163,6 +163,11 @@ func (r *JobRunner) waitForExit() {
 	failed := r.job.State == JobStateFailed
 	r.jobMu.Unlock()
 
+	// Cleanup process resources (e.g., remove containers)
+	if cleanupErr := r.process.Cleanup(context.Background()); cleanupErr != nil {
+		r.logger.Error().Err(cleanupErr).Msg("failed to cleanup process")
+	}
+
 	// Call failure callback before marking done (allows retry)
 	if failed && r.onFailure != nil {
 		r.onFailure(r, exitCode)
