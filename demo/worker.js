@@ -8,8 +8,11 @@ const spawnedAt = process.env.CHECKER_JOB_SPAWNED_AT
   ? parseInt(process.env.CHECKER_JOB_SPAWNED_AT, 10)
   : null
 
+const arch = process.env.CHECKER_ARCH || "unknown"
+const os = process.env.CHECKER_OS || "unknown"
+
 console.log(
-  `Worker starting... Job ID: ${jobId}, Definition: ${defName}@${defVersion}`
+  `Worker starting... Job ID: ${jobId}, Definition: ${defName}@${defVersion} on ${os} ${arch}`
 )
 
 async function checkpoint(suspendDuration) {
