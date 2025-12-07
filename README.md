@@ -22,7 +22,7 @@ Workflows are great for saga patterns—a clear sequence of steps with arbitrary
 
 Event histories grow painfully large if you poll anything. Every parameter you pass or return must be serializable. You constantly worry about determinism violations. And wiring activities to the right workers on the right queues adds operational complexity that's easy to get wrong.
 
-With memory checkpointing, you just write normal code and sprinkle in `checkpoint()` calls. No event history, no determinism rules, no serializability headaches, no activity wiring.
+With memory checkpointing, you just write normal code and sprinkle in `checkpoint()` calls. No event history, no determinism rules, no serializability headaches, no activity wiring. And recovery is predictable — you resume from the last checkpoint, exactly where you'd expect.
 
 ### Example
 
