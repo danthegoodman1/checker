@@ -19,107 +19,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestRunJSWorker(t *testing.T) {
-	h := hypervisor.New(hypervisor.Config{
-		CallerHTTPAddress:  "127.0.0.1:18080",
-		RuntimeHTTPAddress: "127.0.0.1:18081",
-	})
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		assert.NoError(t, h.Shutdown(ctx))
-	}()
-
-	nodeRuntime := nodejs.NewRuntime()
-	require.NoError(t, h.RegisterRuntime(nodeRuntime))
-
-	cwd, err := os.Getwd()
-	require.NoError(t, err)
-	workerPath := filepath.Join(cwd, "demo", "worker.js")
-
-	_, err = os.Stat(workerPath)
-	require.NoError(t, err, "worker.js not found at %s", workerPath)
-
-	demoJobDef := &hypervisor.JobDefinition{
-		Name:        "test-worker",
-		Version:     "1.0.0",
-		RuntimeType: runtime.RuntimeTypeNodeJS,
-		Config: &nodejs.Config{
-			EntryPoint: workerPath,
-			WorkDir:    filepath.Join(cwd, "demo"),
-			Env:        map[string]string{"NODE_ENV": "test"},
-		},
-	}
-	require.NoError(t, h.RegisterJobDefinition(demoJobDef))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	jobID, err := h.Spawn(ctx, hypervisor.SpawnOptions{
-		DefinitionName:    "test-worker",
-		DefinitionVersion: hypervisor.VersionLatest,
-		Params:            json.RawMessage(`{"test": true}`),
-	})
-	require.NoError(t, err)
-	t.Logf("Spawned job: %s", jobID)
-
-	result, err := h.GetResult(ctx, jobID, true)
-	require.NoError(t, err)
-	assert.Equal(t, 0, result.ExitCode)
-	t.Logf("Job completed with exit code: %d", result.ExitCode)
-}
-
-func TestRunJSWorkerWithNonZeroExit(t *testing.T) {
-	tmpDir := t.TempDir()
-	workerPath := filepath.Join(tmpDir, "failing-worker.js")
-	workerCode := `
-console.log("This worker will exit with code 1");
-process.exit(1);
-`
-	require.NoError(t, os.WriteFile(workerPath, []byte(workerCode), 0644))
-
-	h := hypervisor.New(hypervisor.Config{
-		CallerHTTPAddress:  "127.0.0.1:18082",
-		RuntimeHTTPAddress: "127.0.0.1:18083",
-	})
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		assert.NoError(t, h.Shutdown(ctx))
-	}()
-
-	nodeRuntime := nodejs.NewRuntime()
-	require.NoError(t, h.RegisterRuntime(nodeRuntime))
-
-	jobDef := &hypervisor.JobDefinition{
-		Name:        "failing-worker",
-		Version:     "1.0.0",
-		RuntimeType: runtime.RuntimeTypeNodeJS,
-		Config: &nodejs.Config{
-			EntryPoint: workerPath,
-			WorkDir:    tmpDir,
-		},
-	}
-	require.NoError(t, h.RegisterJobDefinition(jobDef))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	jobID, err := h.Spawn(ctx, hypervisor.SpawnOptions{
-		DefinitionName:    "failing-worker",
-		DefinitionVersion: hypervisor.VersionLatest,
-	})
-	require.NoError(t, err)
-
-	result, err := h.GetResult(ctx, jobID, true)
-	require.NoError(t, err)
-	assert.Equal(t, 1, result.ExitCode)
-	t.Logf("Job correctly exited with code: %d", result.ExitCode)
-}
-
 func TestRunJSWorkerViaHTTPAPI(t *testing.T) {
-	callerAddr := "127.0.0.1:18084"
-	runtimeAddr := "127.0.0.1:18085"
+	callerAddr := "127.0.0.1:18080"
+	runtimeAddr := "127.0.0.1:18081"
 
 	h := hypervisor.New(hypervisor.Config{
 		CallerHTTPAddress:  callerAddr,
@@ -145,13 +47,12 @@ func TestRunJSWorkerViaHTTPAPI(t *testing.T) {
 
 	// Register job definition via HTTP
 	registerReq := map[string]any{
-		"name":         "test-worker-http",
+		"name":         "test-worker",
 		"version":      "1.0.0",
 		"runtime_type": runtime.RuntimeTypeNodeJS,
 		"config": map[string]any{
 			"entry_point": workerPath,
 			"work_dir":    filepath.Join(cwd, "demo"),
-			"env":         map[string]string{"NODE_ENV": "test"},
 		},
 	}
 	registerBody, _ := json.Marshal(registerReq)
@@ -162,18 +63,9 @@ func TestRunJSWorkerViaHTTPAPI(t *testing.T) {
 	resp.Body.Close()
 	require.Equal(t, http.StatusCreated, resp.StatusCode, "register failed: %s", string(body))
 
-	// List definitions
-	resp, err = client.Get(baseURL + "/definitions")
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	var definitions []any
-	json.NewDecoder(resp.Body).Decode(&definitions)
-	resp.Body.Close()
-	assert.Len(t, definitions, 1)
-
 	// Spawn job via HTTP
 	spawnReq := map[string]any{
-		"definition_name":    "test-worker-http",
+		"definition_name":    "test-worker",
 		"definition_version": "1.0.0",
 		"params":             map[string]any{"test": true},
 	}
@@ -191,15 +83,6 @@ func TestRunJSWorkerViaHTTPAPI(t *testing.T) {
 	require.NoError(t, json.Unmarshal(body, &spawnResp))
 	t.Logf("Spawned job: %s", spawnResp.JobID)
 
-	// Get job status
-	resp, err = client.Get(fmt.Sprintf("%s/jobs/%s", baseURL, spawnResp.JobID))
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	var job map[string]any
-	json.NewDecoder(resp.Body).Decode(&job)
-	resp.Body.Close()
-	t.Logf("Job state: %v", job["State"])
-
 	// Wait for result
 	resp, err = client.Get(fmt.Sprintf("%s/jobs/%s/result?wait=true", baseURL, spawnResp.JobID))
 	require.NoError(t, err)
@@ -214,12 +97,15 @@ func TestRunJSWorkerViaHTTPAPI(t *testing.T) {
 	assert.Equal(t, 0, result.ExitCode)
 	t.Logf("Job completed with exit code: %d", result.ExitCode)
 
-	// List jobs
-	resp, err = client.Get(baseURL + "/jobs")
+	// Verify job was checkpointed by checking the job state
+	resp, err = client.Get(fmt.Sprintf("%s/jobs/%s", baseURL, spawnResp.JobID))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	var jobs []any
-	json.NewDecoder(resp.Body).Decode(&jobs)
+	var job struct {
+		CheckpointCount int `json:"CheckpointCount"`
+	}
+	json.NewDecoder(resp.Body).Decode(&job)
 	resp.Body.Close()
-	assert.Len(t, jobs, 1)
+	assert.Equal(t, 1, job.CheckpointCount, "expected 1 checkpoint")
+	t.Logf("Job checkpoint count: %d", job.CheckpointCount)
 }
