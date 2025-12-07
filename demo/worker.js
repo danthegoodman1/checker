@@ -4,6 +4,9 @@ const jobId = process.env.CHECKER_JOB_ID || "unknown"
 const defName = process.env.CHECKER_JOB_DEFINITION_NAME || "unknown"
 const defVersion = process.env.CHECKER_JOB_DEFINITION_VERSION || "unknown"
 const apiUrl = process.env.CHECKER_API_URL
+const checkpointStopAfter = process.env.CHECKER_CHECKPOINT_STOP_AFTER
+  ? parseInt(process.env.CHECKER_CHECKPOINT_STOP_AFTER, 10)
+  : null
 
 console.log(
   `Worker starting... Job ID: ${jobId}, Definition: ${defName}@${defVersion}`
@@ -19,7 +22,16 @@ async function checkpoint(suspendDuration) {
   if (!resp.ok) {
     throw new Error(`Checkpoint failed: ${resp.status} ${await resp.text()}`)
   }
-  return resp.json()
+  const result = await resp.json()
+
+  // If the server specifies a grace period, wait for it before returning.
+  // This ensures the worker is idle (not making progress) when the container is stopped.
+  if (result.grace_period_ms && result.grace_period_ms > 0) {
+    console.log(`Waiting ${result.grace_period_ms}ms grace period before checkpoint completes...`)
+    await new Promise((resolve) => setTimeout(resolve, result.grace_period_ms))
+  }
+
+  return result
 }
 
 async function exit(exitCode, output) {
@@ -73,9 +85,28 @@ async function main() {
   const step1Result = { step: 1, value: inputNumber + 1 }
   console.log("Step 1 complete:", step1Result)
 
-  console.log("Checkpointing...")
-  const checkpointResult = await checkpoint()
-  console.log("Checkpoint complete:", JSON.stringify(checkpointResult))
+  // Handle time-based checkpoint logic for checkpoint/restore testing
+  // This prevents infinite loops on macOS where checkpoint just stops/starts the container
+  let checkpointSkipped = false
+  if (params.checkpoint_with_delay && checkpointStopAfter !== null) {
+    const nowSeconds = Math.floor(Date.now() / 1000)
+    if (nowSeconds < checkpointStopAfter) {
+      console.log(
+        `Time-based checkpoint: now=${nowSeconds}, stopAfter=${checkpointStopAfter}, calling checkpoint with 2s suspend`
+      )
+      const checkpointResult = await checkpoint("2s")
+      console.log("Checkpoint complete:", JSON.stringify(checkpointResult))
+    } else {
+      console.log(
+        `Time-based checkpoint: now=${nowSeconds}, stopAfter=${checkpointStopAfter}, skipping checkpoint (after restore)`
+      )
+      checkpointSkipped = true
+    }
+  } else {
+    console.log("Checkpointing...")
+    const checkpointResult = await checkpoint()
+    console.log("Checkpoint complete:", JSON.stringify(checkpointResult))
+  }
 
   if (params.crash === "after_checkpoint" && metadata.retry_count === 0) {
     console.log("Simulating crash after checkpoint (retry_count=0)...")
@@ -87,7 +118,7 @@ async function main() {
   console.log("Step 2 complete:", step2Result)
 
   console.log("Worker finished successfully")
-  await exit(0, { result: step2Result })
+  await exit(0, { result: step2Result, checkpoint_skipped: checkpointSkipped })
 }
 
 main().catch((err) => {

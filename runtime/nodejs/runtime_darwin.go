@@ -32,6 +32,10 @@ func (c *checkpoint) String() string {
 	return fmt.Sprintf("nodejs-darwin-checkpoint[exec=%s]", c.executionID)
 }
 
+func (c *checkpoint) GracePeriodMs() int64 {
+	return 100
+}
+
 // processHandle holds information about a running NodeJS process on macOS.
 type processHandle struct {
 	executionID    string
@@ -103,6 +107,10 @@ func NewRuntime() *Runtime {
 
 func (r *Runtime) Type() runtime.RuntimeType {
 	return runtime.RuntimeTypeNodeJS
+}
+
+func (r *Runtime) CheckpointGracePeriodMs() int64 {
+	return 100
 }
 
 func (r *Runtime) ParseConfig(raw []byte) (any, error) {

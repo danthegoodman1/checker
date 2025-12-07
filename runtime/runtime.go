@@ -18,6 +18,12 @@ const (
 type Checkpoint interface {
 	// String returns a human-readable identifier for logging/debugging
 	String() string
+
+	// GracePeriodMs returns the time in milliseconds that the worker should wait
+	// after receiving the checkpoint response before the runtime will stop the process.
+	// This allows the worker to be idle (no open connections, no progress) when stopped.
+	// Returns 0 if no grace period is needed.
+	GracePeriodMs() int64
 }
 
 // Process represents a running execution with its own state.
@@ -75,4 +81,10 @@ type Runtime interface {
 	// Restore resumes an execution from a checkpoint.
 	// Returns a new Process representing the restored execution.
 	Restore(ctx context.Context, checkpoint Checkpoint) (Process, error)
+
+	// CheckpointGracePeriodMs returns the grace period in milliseconds that workers
+	// should wait after receiving a checkpoint response before the runtime stops the process.
+	// This allows the worker to be idle (no open connections) when stopped.
+	// Returns 0 if no grace period is needed (e.g., Linux with CRIU).
+	CheckpointGracePeriodMs() int64
 }

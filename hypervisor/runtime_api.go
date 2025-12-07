@@ -1,6 +1,7 @@
 package hypervisor
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -24,7 +25,8 @@ type CheckpointJobRequest struct {
 }
 
 type CheckpointJobResponse struct {
-	Job *Job `json:"job"`
+	Job           *Job  `json:"job"`
+	GracePeriodMs int64 `json:"grace_period_ms,omitempty"`
 }
 
 func (h *Hypervisor) handleCheckpointJob(c echo.Context) error {
@@ -42,12 +44,34 @@ func (h *Hypervisor) handleCheckpointJob(c echo.Context) error {
 		}
 	}
 
-	job, err := h.CheckpointJob(c.Request().Context(), req.ID, suspendDuration)
+	// Get the grace period before checkpointing
+	gracePeriodMs, err := h.GetCheckpointGracePeriod(req.ID)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusNotFound, err.Error())
 	}
 
-	return c.JSON(http.StatusOK, CheckpointJobResponse{Job: job})
+	// Send the response first with the grace period.
+	// The worker will wait for this grace period, ensuring it's idle when we checkpoint.
+	if err := c.JSON(http.StatusOK, CheckpointJobResponse{GracePeriodMs: gracePeriodMs}); err != nil {
+		return err
+	}
+
+	// Small delay to ensure the response is fully flushed over the network
+	// before we stop the container
+	time.Sleep(50 * time.Millisecond)
+
+	// Now perform the actual checkpoint (this may stop the container on darwin).
+	// Use a background context since the request context will be cancelled after we return.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, err = h.CheckpointJob(ctx, req.ID, suspendDuration)
+	if err != nil {
+		// Log the error but don't return it - response already sent
+		logger.Error().Err(err).Str("job_id", req.ID).Msg("checkpoint failed after response sent")
+	}
+
+	return nil
 }
 
 type TakeJobLockRequest struct {

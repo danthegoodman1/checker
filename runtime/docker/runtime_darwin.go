@@ -42,6 +42,10 @@ func (c *dockerCheckpoint) String() string {
 	return fmt.Sprintf("docker-darwin-checkpoint[exec=%s,container=%s]", c.executionID, c.containerID)
 }
 
+func (c *dockerCheckpoint) GracePeriodMs() int64 {
+	return 100
+}
+
 // processHandle holds information about a running Docker container on macOS.
 type processHandle struct {
 	executionID    string
@@ -58,6 +62,8 @@ func (h *processHandle) String() string {
 }
 
 // On macOS, checkpoint stops the container since CRIU is not available.
+// The HTTP handler is responsible for sending the response before calling this method.
+// The worker waits for a grace period after receiving the response, ensuring it's idle when stopped.
 func (h *processHandle) Checkpoint(ctx context.Context, keepRunning bool) (runtime.Checkpoint, error) {
 	h.logger.Debug().
 		Bool("keep_running", keepRunning).
@@ -143,6 +149,10 @@ func NewRuntime() (*Runtime, error) {
 
 func (r *Runtime) Type() runtime.RuntimeType {
 	return runtime.RuntimeTypeDocker
+}
+
+func (r *Runtime) CheckpointGracePeriodMs() int64 {
+	return 100
 }
 
 func (r *Runtime) ParseConfig(raw []byte) (any, error) {

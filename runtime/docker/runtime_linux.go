@@ -45,6 +45,10 @@ func (c *dockerCheckpoint) String() string {
 		c.executionID, c.containerID, c.checkpointName)
 }
 
+func (c *dockerCheckpoint) GracePeriodMs() int64 {
+	return 100
+}
+
 // processHandle holds information about a running Docker container on Linux.
 type processHandle struct {
 	executionID    string
@@ -161,6 +165,10 @@ func NewRuntime() (*Runtime, error) {
 
 func (r *Runtime) Type() runtime.RuntimeType {
 	return runtime.RuntimeTypeDocker
+}
+
+func (r *Runtime) CheckpointGracePeriodMs() int64 {
+	return 100
 }
 
 func (r *Runtime) ParseConfig(raw []byte) (any, error) {

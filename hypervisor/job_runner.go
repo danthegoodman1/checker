@@ -127,6 +127,13 @@ func (r *JobRunner) waitForExit() {
 	exitCode, err := r.process.Wait(r.ctx)
 
 	r.jobMu.Lock()
+	// If suspended, the process exit is expected - don't mark as failed.
+	// The wake timer is scheduled by the Checkpoint method after storing the checkpoint.
+	if r.job.State == JobStateSuspended {
+		r.jobMu.Unlock()
+		return
+	}
+
 	// Only update if not already terminal (could have been killed or exited via API)
 	if !r.job.IsTerminal() {
 		now := time.Now()
@@ -158,6 +165,56 @@ func (r *JobRunner) waitForExit() {
 	r.MarkDone()
 }
 
+// scheduleSuspendWake schedules a job restore when the suspend duration expires.
+func (r *JobRunner) scheduleSuspendWake(wakeTime time.Time) {
+	delay := time.Until(wakeTime)
+	if delay < 0 {
+		delay = 0
+	}
+
+	r.logger.Debug().
+		Time("wake_time", wakeTime).
+		Dur("delay", delay).
+		Msg("scheduling suspend wake")
+
+	time.AfterFunc(delay, func() {
+		r.logger.Debug().Msg("suspend wake timer fired, restoring job")
+
+		r.jobMu.Lock()
+		// Check if still suspended (could have been killed while waiting)
+		if r.job.State != JobStateSuspended {
+			r.logger.Debug().
+				Str("state", string(r.job.State)).
+				Msg("job no longer suspended, skipping restore")
+			r.jobMu.Unlock()
+			return
+		}
+		r.job.State = JobStateRunning
+		r.job.SuspendUntil = nil
+		r.jobMu.Unlock()
+
+		// Restore from checkpoint
+		process, err := r.rt.Restore(r.ctx, r.checkpoint)
+		if err != nil {
+			r.logger.Error().Err(err).Msg("failed to restore from checkpoint")
+			r.jobMu.Lock()
+			r.job.State = JobStateFailed
+			r.job.Error = fmt.Sprintf("failed to restore: %v", err)
+			now := time.Now()
+			r.job.CompletedAt = &now
+			r.jobMu.Unlock()
+			r.MarkDone()
+			return
+		}
+
+		r.process = process
+		r.logger.Debug().Msg("job restored from checkpoint")
+
+		// Start monitoring the restored process
+		go r.waitForExit()
+	})
+}
+
 // notifyWaiters signals all result waiters that the job has completed.
 func (r *JobRunner) notifyWaiters() {
 	r.waitersMu.Lock()
@@ -174,6 +231,11 @@ func (r *JobRunner) GetState(ctx context.Context) (*Job, error) {
 	r.jobMu.RLock()
 	defer r.jobMu.RUnlock()
 	return r.job.Clone(), nil
+}
+
+// GetCheckpointGracePeriod returns the grace period from the runtime.
+func (r *JobRunner) GetCheckpointGracePeriod() int64 {
+	return r.rt.CheckpointGracePeriodMs()
 }
 
 // Checkpoint requests a checkpoint of the job.
@@ -194,21 +256,15 @@ func (r *JobRunner) Checkpoint(ctx context.Context, suspendDuration time.Duratio
 	r.checkpointMu.Lock()
 	defer r.checkpointMu.Unlock()
 
-	// Perform the checkpoint - suspend if duration > 0
 	keepRunning := suspendDuration == 0
-	checkpoint, err := r.process.Checkpoint(ctx, keepRunning)
-	if err != nil {
-		return nil, fmt.Errorf("checkpoint failed: %w", err)
-	}
-	r.checkpoint = checkpoint
 
-	// Update job state
+	// Update job state BEFORE stopping the container.
+	// This prevents a race where waitForExit sees the container exit
+	// but the state hasn't been updated yet.
 	r.jobMu.Lock()
-	defer r.jobMu.Unlock()
 	r.job.CheckpointCount++
 	now := time.Now()
 	r.job.LastCheckpointAt = &now
-
 	if !keepRunning {
 		r.job.State = JobStateSuspended
 		suspendUntil := now.Add(suspendDuration)
@@ -216,7 +272,27 @@ func (r *JobRunner) Checkpoint(ctx context.Context, suspendDuration time.Duratio
 	} else {
 		r.job.State = JobStateCheckpointed
 	}
+	r.jobMu.Unlock()
 
+	// Perform the checkpoint (this may stop the container on darwin)
+	checkpoint, err := r.process.Checkpoint(ctx, keepRunning)
+	if err != nil {
+		// Revert state on failure
+		r.jobMu.Lock()
+		r.job.CheckpointCount--
+		r.job.State = JobStateRunning
+		r.job.SuspendUntil = nil
+		r.jobMu.Unlock()
+		return nil, fmt.Errorf("checkpoint failed: %w", err)
+	}
+	r.checkpoint = checkpoint
+
+	// Schedule the wake timer now that the checkpoint is stored
+	r.jobMu.Lock()
+	defer r.jobMu.Unlock()
+	if !keepRunning && r.job.SuspendUntil != nil {
+		r.scheduleSuspendWake(*r.job.SuspendUntil)
+	}
 	return r.job.Clone(), nil
 }
 

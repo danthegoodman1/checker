@@ -129,10 +129,17 @@ func (e *testEnv) registerWorkerWithConfig(name, version string, runtimeType run
 }
 
 func (e *testEnv) spawnJob(definitionName string, params map[string]any) string {
+	return e.spawnJobWithEnv(definitionName, params, nil)
+}
+
+func (e *testEnv) spawnJobWithEnv(definitionName string, params map[string]any, env map[string]string) string {
 	spawnReq := map[string]any{
 		"definition_name":    definitionName,
 		"definition_version": "1.0.0",
 		"params":             params,
+	}
+	if env != nil {
+		spawnReq["env"] = env
 	}
 	spawnBody, _ := json.Marshal(spawnReq)
 
@@ -299,6 +306,53 @@ func TestDockerWorker(t *testing.T) {
 	t.Logf("Input: %d, Output: %d", inputNumber, output.Result.Value)
 
 	job := env.getJob(jobID)
+	assert.Equal(t, float64(1), job["CheckpointCount"])
+	t.Logf("Docker job checkpoint count: %v", job["CheckpointCount"])
+}
+
+// TestDockerCheckpointRestore tests checkpoint with suspend_duration, then restore after delay.
+// On macOS, checkpoint just stops/starts the container. To avoid infinite loops,
+// we set a CHECKER_CHECKPOINT_STOP_AFTER env var with a Unix timestamp.
+// The worker checks: if current time < timestamp, call checkpoint. If after, skip it.
+// This ensures the restored job completes instead of checkpointing forever.
+func TestDockerCheckpointRestore(t *testing.T) {
+	env := setupDockerTest(t)
+	env.registerDockerWorker(nil)
+
+	// Set the stop-after time to 3 seconds from now
+	// Worker will checkpoint with 2s suspend if before this time, skip checkpoint if after
+	stopAfter := time.Now().Add(3 * time.Second).Unix()
+
+	inputNumber := 10
+	expectedResult := (inputNumber + 1) * 2
+
+	jobID := env.spawnJobWithEnv("test-docker-worker", map[string]any{
+		"number":                inputNumber,
+		"checkpoint_with_delay": true, // Tell worker to use time-based checkpoint logic
+	}, map[string]string{
+		"CHECKER_CHECKPOINT_STOP_AFTER": fmt.Sprintf("%d", stopAfter),
+	})
+	t.Logf("Spawned Docker checkpoint/restore job: %s", jobID)
+
+	result := env.waitForResult(jobID)
+	assert.Equal(t, 0, result.ExitCode)
+	t.Logf("Docker job completed with exit code: %d, output: %s", result.ExitCode, string(result.Output))
+
+	var output struct {
+		Result struct {
+			Step  int `json:"step"`
+			Value int `json:"value"`
+		} `json:"result"`
+		CheckpointSkipped bool `json:"checkpoint_skipped"`
+	}
+	require.NoError(t, json.Unmarshal(result.Output, &output))
+	assert.Equal(t, expectedResult, output.Result.Value, "expected (input + 1) * 2")
+	t.Logf("Input: %d, Output: %d, CheckpointSkipped: %v", inputNumber, output.Result.Value, output.CheckpointSkipped)
+
+	job := env.getJob(jobID)
+	// On macOS: first run checkpoints (stops container), suspend timer restores it,
+	// second run skips checkpoint -> 1 checkpoint total
+	// On Linux with real CRIU: checkpoint preserves state, restore continues -> 1 checkpoint
 	assert.Equal(t, float64(1), job["CheckpointCount"])
 	t.Logf("Docker job checkpoint count: %v", job["CheckpointCount"])
 }

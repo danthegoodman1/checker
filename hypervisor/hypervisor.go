@@ -310,6 +310,21 @@ func (h *Hypervisor) GetResult(ctx context.Context, id string, wait bool) (*JobR
 	return job.Result, nil
 }
 
+// GetCheckpointGracePeriod returns the grace period in ms that workers should wait
+// after receiving a checkpoint response before the runtime stops the process.
+// Called via runtime API before sending checkpoint response.
+func (h *Hypervisor) GetCheckpointGracePeriod(jobID string) (int64, error) {
+	h.runnersMu.RLock()
+	runner, exists := h.runners[jobID]
+	h.runnersMu.RUnlock()
+
+	if !exists {
+		return 0, fmt.Errorf("job %q not found", jobID)
+	}
+
+	return runner.GetCheckpointGracePeriod(), nil
+}
+
 // CheckpointJob checkpoints a job, optionally suspending it for a given duration.
 // Will block until all currently held locks are released.
 // Called via runtime API
