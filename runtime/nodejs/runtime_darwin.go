@@ -4,6 +4,7 @@ package nodejs
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -99,6 +100,17 @@ func NewRuntime() *Runtime {
 
 func (r *Runtime) Type() runtime.RuntimeType {
 	return runtime.RuntimeTypeNodeJS
+}
+
+func (r *Runtime) ParseConfig(raw []byte) (any, error) {
+	var cfg Config
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil, fmt.Errorf("failed to parse nodejs config: %w", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid nodejs config: %w", err)
+	}
+	return &cfg, nil
 }
 
 func (r *Runtime) Start(ctx context.Context, executionID string, env map[string]string, config any) (runtime.Process, error) {

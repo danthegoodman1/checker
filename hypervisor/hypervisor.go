@@ -9,7 +9,6 @@ import (
 
 	"github.com/danthegoodman1/checker/http_server"
 	"github.com/danthegoodman1/checker/runtime"
-	"github.com/labstack/echo/v4"
 )
 
 // Hypervisor is the main service that manages job definitions and job lifecycle.
@@ -69,12 +68,8 @@ func New(cfg Config) *Hypervisor {
 	h.callerHTTPAddress = cfg.CallerHTTPAddress
 	h.runtimeHTTPAddress = cfg.RuntimeHTTPAddress
 
-	h.callerHTTPServer = http_server.StartHTTPServer(h.callerHTTPAddress, "", func(e *echo.Echo) {
-		// TODO: register handlers
-	})
-	h.runtimeHTTPServer = http_server.StartHTTPServer(h.runtimeHTTPAddress, "", func(e *echo.Echo) {
-		// TODO: register handlers
-	})
+	h.callerHTTPServer = http_server.StartHTTPServer(h.callerHTTPAddress, "", h.RegisterCallerAPI)
+	h.runtimeHTTPServer = http_server.StartHTTPServer(h.runtimeHTTPAddress, "", h.RegisterRuntimeAPI)
 
 	return h
 }

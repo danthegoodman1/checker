@@ -47,6 +47,9 @@ type Runtime interface {
 	// Type returns the runtime type this implementation handles
 	Type() RuntimeType
 
+	// ParseConfig parses runtime-specific config from JSON.
+	ParseConfig(raw []byte) (any, error)
+
 	// Start launches a new execution with the given config.
 	// Returns a Process that can be used for subsequent operations.
 	// The env parameter contains environment variables set by the hypervisor.
