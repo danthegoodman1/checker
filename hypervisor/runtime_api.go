@@ -56,7 +56,7 @@ func (h *Hypervisor) handleCheckpointJob(c echo.Context) error {
 		return err
 	}
 
-	// Now perform the actual checkpoint (this may stop the container on darwin).
+	// Now perform the actual checkpoint.
 	// Use a background context since the request context will be cancelled after we return.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

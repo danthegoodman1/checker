@@ -177,6 +177,7 @@ func (h *Hypervisor) Spawn(ctx context.Context, opts SpawnOptions) (string, erro
 	env["CHECKER_JOB_ID"] = jobID
 	env["CHECKER_JOB_DEFINITION_NAME"] = jd.Name
 	env["CHECKER_JOB_DEFINITION_VERSION"] = jd.Version
+	env["CHECKER_JOB_SPAWNED_AT"] = fmt.Sprintf("%d", time.Now().Unix())
 
 	job := &Job{
 		ID:                jobID,

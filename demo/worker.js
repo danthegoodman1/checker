@@ -4,8 +4,8 @@ const jobId = process.env.CHECKER_JOB_ID || "unknown"
 const defName = process.env.CHECKER_JOB_DEFINITION_NAME || "unknown"
 const defVersion = process.env.CHECKER_JOB_DEFINITION_VERSION || "unknown"
 const apiUrl = process.env.CHECKER_API_URL
-const checkpointStopAfter = process.env.CHECKER_CHECKPOINT_STOP_AFTER
-  ? parseInt(process.env.CHECKER_CHECKPOINT_STOP_AFTER, 10)
+const spawnedAt = process.env.CHECKER_JOB_SPAWNED_AT
+  ? parseInt(process.env.CHECKER_JOB_SPAWNED_AT, 10)
   : null
 
 console.log(
@@ -87,18 +87,20 @@ async function main() {
 
   // Handle time-based checkpoint logic for checkpoint/restore testing
   // This prevents infinite loops on macOS where checkpoint just stops/starts the container
+  // If checkpoint_suspend_within_secs is set, only checkpoint if within that many seconds of spawn
   let checkpointSkipped = false
-  if (params.checkpoint_with_delay && checkpointStopAfter !== null) {
+  if (params.checkpoint_suspend_within_secs && spawnedAt !== null) {
     const nowSeconds = Math.floor(Date.now() / 1000)
-    if (nowSeconds < checkpointStopAfter) {
+    const cutoffTime = spawnedAt + params.checkpoint_suspend_within_secs
+    if (nowSeconds <= cutoffTime) {
       console.log(
-        `Time-based checkpoint: now=${nowSeconds}, stopAfter=${checkpointStopAfter}, calling checkpoint with 2s suspend`
+        `Time-based checkpoint: now=${nowSeconds}, spawnedAt=${spawnedAt}, cutoff=${cutoffTime}, calling checkpoint with suspend`
       )
-      const checkpointResult = await checkpoint("2s")
+      const checkpointResult = await checkpoint(params.checkpoint_suspend_duration || "2s")
       console.log("Checkpoint complete:", JSON.stringify(checkpointResult))
     } else {
       console.log(
-        `Time-based checkpoint: now=${nowSeconds}, stopAfter=${checkpointStopAfter}, skipping checkpoint (after restore)`
+        `Time-based checkpoint: now=${nowSeconds}, spawnedAt=${spawnedAt}, cutoff=${cutoffTime}, skipping (restored after cutoff)`
       )
       checkpointSkipped = true
     }

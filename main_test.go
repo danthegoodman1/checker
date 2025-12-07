@@ -312,25 +312,22 @@ func TestDockerWorker(t *testing.T) {
 
 // TestDockerCheckpointRestore tests checkpoint with suspend_duration, then restore after delay.
 // On macOS, checkpoint just stops/starts the container. To avoid infinite loops,
-// we set a CHECKER_CHECKPOINT_STOP_AFTER env var with a Unix timestamp.
-// The worker checks: if current time < timestamp, call checkpoint. If after, skip it.
-// This ensures the restored job completes instead of checkpointing forever.
+// we use the CHECKER_JOB_SPAWNED_AT env var (set by hypervisor) combined with
+// checkpoint_suspend_within_secs param. Worker only checkpoints if within that window.
+// After restore, enough time has passed so checkpoint is skipped.
 func TestDockerCheckpointRestore(t *testing.T) {
 	env := setupDockerTest(t)
 	env.registerDockerWorker(nil)
 
-	// Set the stop-after time to 3 seconds from now
-	// Worker will checkpoint with 2s suspend if before this time, skip checkpoint if after
-	stopAfter := time.Now().Add(3 * time.Second).Unix()
-
 	inputNumber := 10
 	expectedResult := (inputNumber + 1) * 2
 
-	jobID := env.spawnJobWithEnv("test-docker-worker", map[string]any{
-		"number":                inputNumber,
-		"checkpoint_with_delay": true, // Tell worker to use time-based checkpoint logic
-	}, map[string]string{
-		"CHECKER_CHECKPOINT_STOP_AFTER": fmt.Sprintf("%d", stopAfter),
+	// Worker will checkpoint with 4s suspend only if within 3 seconds of spawn time.
+	// After the 4s suspend + restore, we'll be past the 3s window so checkpoint is skipped.
+	jobID := env.spawnJob("test-docker-worker", map[string]any{
+		"number":                         inputNumber,
+		"checkpoint_suspend_within_secs": 3, // Only checkpoint within 3s of spawn
+		"checkpoint_suspend_duration":    "4s",
 	})
 	t.Logf("Spawned Docker checkpoint/restore job: %s", jobID)
 

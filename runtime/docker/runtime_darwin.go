@@ -71,7 +71,7 @@ func (h *processHandle) Checkpoint(ctx context.Context, keepRunning bool) (runti
 
 	if !keepRunning {
 		// Stop the container to simulate checkpoint
-		timeout := 10
+		timeout := 1
 		if err := h.client.ContainerStop(ctx, h.containerID, container.StopOptions{Timeout: &timeout}); err != nil {
 			return nil, fmt.Errorf("failed to stop container for checkpoint: %w", err)
 		}
