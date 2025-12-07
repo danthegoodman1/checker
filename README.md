@@ -34,7 +34,7 @@ With Checker, you can structure your code to fetch a large S3 file as sequential
 
 If your process crashes at 9.9GB of a 10GB file, it resumes from the last checkpoint - no need to re-download the file or fast-forward the parser to where you left off.
 
-Other durable execution approaches struggle here. Durable state machines can't serialize the streaming parser's internal state, so on recovery you'd have to re-download and re-scan up to where you left off. Workflows like Temporal face the same re-scan problem, or you use a single long-running activity for the whole download (painful recovery if it fails near the end), or one activity per range (massive overhead from replaying history).
+Other durable execution approaches struggle here. Durable state machines can't serialize the streaming parser's internal state, so on recovery you'd have to re-download and re-scan up to where you left off. Workflow engines like Temporal face the same re-scan problem, or you use a single long-running activity for the whole download (painful recovery if it fails near the end), or one activity per range (massive overhead from replaying history).
 
 Workflows also risk creating massive event histories that slow down recovery and eventually hit hard limits.
 
