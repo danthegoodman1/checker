@@ -125,35 +125,6 @@ func (h *processHandle) Wait(ctx context.Context) (int, error) {
 	return -1, fmt.Errorf("unexpected wait state")
 }
 
-func (h *processHandle) Logs(ctx context.Context) (io.ReadCloser, io.ReadCloser, error) {
-	h.logger.Debug().Msg("fetching container logs")
-
-	// Get multiplexed log stream from Docker
-	logReader, err := h.client.ContainerLogs(ctx, h.containerID, container.LogsOptions{
-		ShowStdout: true,
-		ShowStderr: true,
-		Follow:     true,
-		Timestamps: false,
-	})
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get container logs: %w", err)
-	}
-
-	// Create pipes for demultiplexed stdout and stderr
-	stdoutReader, stdoutWriter := io.Pipe()
-	stderrReader, stderrWriter := io.Pipe()
-
-	// Demultiplex the Docker log stream in a goroutine
-	go func() {
-		defer logReader.Close()
-		defer stdoutWriter.Close()
-		defer stderrWriter.Close()
-		_, _ = stdcopy.StdCopy(stdoutWriter, stderrWriter, logReader)
-	}()
-
-	return stdoutReader, stderrReader, nil
-}
-
 // NewRuntime creates a new Docker runtime for macOS.
 func NewRuntime() (*Runtime, error) {
 	logger := gologger.NewLogger().With().
@@ -208,14 +179,14 @@ func (r *Runtime) Start(ctx context.Context, opts runtime.StartOptions) (runtime
 		Str("image", cfg.Image).
 		Msg("starting container")
 
-	return r.startContainer(ctx, opts.ExecutionID, opts.Env, cfg, opts.APIHostAddress)
+	return r.startContainer(ctx, opts.ExecutionID, opts.Env, cfg, opts.APIHostAddress, opts.Stdout, opts.Stderr)
 }
 
 // On macOS, this restarts the stopped container since CRIU is not available.
-func (r *Runtime) Restore(ctx context.Context, chk runtime.Checkpoint) (runtime.Process, error) {
-	c, ok := chk.(*dockerCheckpoint)
+func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (runtime.Process, error) {
+	c, ok := opts.Checkpoint.(*dockerCheckpoint)
 	if !ok {
-		return nil, fmt.Errorf("invalid checkpoint type: expected *dockerCheckpoint, got %T", chk)
+		return nil, fmt.Errorf("invalid checkpoint type: expected *dockerCheckpoint, got %T", opts.Checkpoint)
 	}
 
 	r.logger.Debug().
@@ -233,6 +204,11 @@ func (r *Runtime) Restore(ctx context.Context, chk runtime.Checkpoint) (runtime.
 		Str("container_id", c.containerID).
 		Logger()
 
+	// Start streaming logs if writers are provided
+	if opts.Stdout != nil || opts.Stderr != nil {
+		go r.streamLogs(c.containerID, opts.Stdout, opts.Stderr, logger)
+	}
+
 	return &processHandle{
 		executionID:    c.executionID,
 		containerID:    c.containerID,
@@ -244,7 +220,7 @@ func (r *Runtime) Restore(ctx context.Context, chk runtime.Checkpoint) (runtime.
 	}, nil
 }
 
-func (r *Runtime) startContainer(ctx context.Context, executionID string, env map[string]string, cfg *Config, apiHostAddress string) (runtime.Process, error) {
+func (r *Runtime) startContainer(ctx context.Context, executionID string, env map[string]string, cfg *Config, apiHostAddress string, stdout, stderr io.Writer) (runtime.Process, error) {
 	containerName := fmt.Sprintf("checker-%s", executionID)
 
 	// Extract port from apiHostAddress (e.g., "127.0.0.1:18083" -> "18083")
@@ -358,6 +334,11 @@ func (r *Runtime) startContainer(ctx context.Context, executionID string, env ma
 
 	logger.Debug().Msg("container started")
 
+	// Start streaming logs if writers are provided
+	if stdout != nil || stderr != nil {
+		go r.streamLogs(resp.ID, stdout, stderr, logger)
+	}
+
 	return &processHandle{
 		executionID:    executionID,
 		containerID:    resp.ID,
@@ -367,6 +348,38 @@ func (r *Runtime) startContainer(ctx context.Context, executionID string, env ma
 		apiHostAddress: apiHostAddress,
 		logger:         logger,
 	}, nil
+}
+
+// streamLogs fetches container logs and writes them to the provided writers.
+func (r *Runtime) streamLogs(containerID string, stdout, stderr io.Writer, logger zerolog.Logger) {
+	// Use a background context since we want logs to stream for the lifetime of the container
+	ctx := context.Background()
+
+	logReader, err := r.client.ContainerLogs(ctx, containerID, container.LogsOptions{
+		ShowStdout: stdout != nil,
+		ShowStderr: stderr != nil,
+		Follow:     true,
+		Timestamps: false,
+	})
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to get container logs")
+		return
+	}
+	defer logReader.Close()
+
+	// Use io.Discard for nil writers
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+
+	// Demultiplex the Docker log stream
+	_, err = stdcopy.StdCopy(stdout, stderr, logReader)
+	if err != nil {
+		logger.Debug().Err(err).Msg("log streaming ended")
+	}
 }
 
 // parseMemoryString parses memory strings like "512m", "1g" into bytes

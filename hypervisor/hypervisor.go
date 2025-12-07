@@ -150,6 +150,12 @@ type SpawnOptions struct {
 	Env map[string]string
 
 	Metadata map[string]string
+
+	// Stdout is where process stdout will be written. If nil, stdout is discarded.
+	Stdout io.Writer
+
+	// Stderr is where process stderr will be written. If nil, stderr is discarded.
+	Stderr io.Writer
 }
 
 // Called via caller API
@@ -204,7 +210,7 @@ func (h *Hypervisor) Spawn(ctx context.Context, opts SpawnOptions) (string, erro
 		}
 	}
 
-	runner := NewJobRunner(job, jd, rt, jd.Config, h.runtimeHTTPAddress)
+	runner := NewJobRunner(job, jd, rt, jd.Config, h.runtimeHTTPAddress, opts.Stdout, opts.Stderr)
 
 	// Set up retry callback
 	runner.SetOnFailure(func(r *JobRunner, exitCode int) {
@@ -442,21 +448,6 @@ func (h *Hypervisor) GetJobMetadata(ctx context.Context, jobID string) (*JobMeta
 		meta.LastCheckpointAtMs = &ms
 	}
 	return meta, nil
-}
-
-// GetJobLogs returns the stdout and stderr log streams for a job.
-// The caller is responsible for closing the readers when done.
-// Returns nil, nil, nil if the job is not found or logs are not available.
-func (h *Hypervisor) GetJobLogs(ctx context.Context, jobID string) (stdout io.ReadCloser, stderr io.ReadCloser, err error) {
-	h.runnersMu.RLock()
-	runner, exists := h.runners[jobID]
-	h.runnersMu.RUnlock()
-
-	if !exists {
-		return nil, nil, fmt.Errorf("job %q not found", jobID)
-	}
-
-	return runner.Logs(ctx)
 }
 
 // ListJobs returns all active jobs.

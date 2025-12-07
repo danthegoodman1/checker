@@ -128,34 +128,6 @@ func (e *testEnv) registerWorkerWithConfig(name, version string, runtimeType run
 	require.Equal(e.t, http.StatusCreated, resp.StatusCode)
 }
 
-func (e *testEnv) spawnJob(definitionName string, params map[string]any) string {
-	return e.spawnJobWithEnv(definitionName, params, nil)
-}
-
-func (e *testEnv) spawnJobWithEnv(definitionName string, params map[string]any, env map[string]string) string {
-	spawnReq := map[string]any{
-		"definition_name":    definitionName,
-		"definition_version": "1.0.0",
-		"params":             params,
-	}
-	if env != nil {
-		spawnReq["env"] = env
-	}
-	spawnBody, _ := json.Marshal(spawnReq)
-
-	resp, err := e.client.Post(e.baseURL+"/jobs", "application/json", bytes.NewReader(spawnBody))
-	require.NoError(e.t, err)
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	require.Equal(e.t, http.StatusCreated, resp.StatusCode, "spawn failed: %s", string(body))
-
-	var spawnResp struct {
-		JobID string `json:"job_id"`
-	}
-	require.NoError(e.t, json.Unmarshal(body, &spawnResp))
-	return spawnResp.JobID
-}
-
 type jobResult struct {
 	ExitCode int             `json:"ExitCode"`
 	Output   json.RawMessage `json:"Output"`
@@ -183,52 +155,31 @@ func (e *testEnv) getJob(jobID string) map[string]any {
 	return job
 }
 
-// streamLogs starts streaming stdout and stderr logs for a job to t.Log.
-// Returns a cancel function to stop streaming.
-func (e *testEnv) streamLogs(jobID string) context.CancelFunc {
-	ctx, cancel := context.WithCancel(context.Background())
+// testLogWriter writes to t.Log with a prefix
+type testLogWriter struct {
+	t      *testing.T
+	prefix string
+}
 
-	stdout, stderr, err := e.h.GetJobLogs(ctx, jobID)
-	if err != nil {
-		e.t.Logf("Failed to get logs for job %s: %v", jobID, err)
-		return cancel
-	}
+func (w *testLogWriter) Write(p []byte) (n int, err error) {
+	w.t.Logf("%s %s", w.prefix, string(p))
+	return len(p), nil
+}
 
-	// Stream stdout
-	if stdout != nil {
-		go func() {
-			defer stdout.Close()
-			buf := make([]byte, 1024)
-			for {
-				n, err := stdout.Read(buf)
-				if n > 0 {
-					e.t.Logf("[%s stdout] %s", jobID[:8], string(buf[:n]))
-				}
-				if err != nil {
-					return
-				}
-			}
-		}()
-	}
+// spawnJobWithLogs spawns a job directly via the hypervisor with log writers.
+// This allows capturing logs from the very start of the process.
+func (e *testEnv) spawnJobWithLogs(definitionName string, params map[string]any) string {
+	paramsJSON, _ := json.Marshal(params)
 
-	// Stream stderr
-	if stderr != nil {
-		go func() {
-			defer stderr.Close()
-			buf := make([]byte, 1024)
-			for {
-				n, err := stderr.Read(buf)
-				if n > 0 {
-					e.t.Logf("[%s stderr] %s", jobID[:8], string(buf[:n]))
-				}
-				if err != nil {
-					return
-				}
-			}
-		}()
-	}
-
-	return cancel
+	jobID, err := e.h.Spawn(context.Background(), hypervisor.SpawnOptions{
+		DefinitionName:    definitionName,
+		DefinitionVersion: "1.0.0",
+		Params:            paramsJSON,
+		Stdout:            &testLogWriter{t: e.t, prefix: "[stdout]"},
+		Stderr:            &testLogWriter{t: e.t, prefix: "[stderr]"},
+	})
+	require.NoError(e.t, err)
+	return jobID
 }
 
 func TestRunJSWorkerViaHTTPAPI(t *testing.T) {
@@ -239,12 +190,8 @@ func TestRunJSWorkerViaHTTPAPI(t *testing.T) {
 	// Worker adds 1 then doubles: (5 + 1) * 2 = 12
 	expectedResult := (inputNumber + 1) * 2
 
-	jobID := env.spawnJob("test-worker", map[string]any{"number": inputNumber})
+	jobID := env.spawnJobWithLogs("test-worker", map[string]any{"number": inputNumber})
 	t.Logf("Spawned job: %s", jobID)
-
-	// Stream logs from the process
-	cancelLogs := env.streamLogs(jobID)
-	defer cancelLogs()
 
 	result := env.waitForResult(jobID)
 	assert.Equal(t, 0, result.ExitCode)
@@ -269,12 +216,8 @@ func TestWorkerCrashNoRetry(t *testing.T) {
 	env := setupTest(t)
 	env.registerWorker(nil) // No retry policy
 
-	jobID := env.spawnJob("test-worker", map[string]any{"crash": "before_checkpoint"})
+	jobID := env.spawnJobWithLogs("test-worker", map[string]any{"crash": "before_checkpoint"})
 	t.Logf("Spawned crashing job: %s", jobID)
-
-	// Stream logs from the process
-	cancelLogs := env.streamLogs(jobID)
-	defer cancelLogs()
 
 	result := env.waitForResult(jobID)
 	assert.NotEqual(t, 0, result.ExitCode, "expected non-zero exit code for crash")
@@ -289,12 +232,8 @@ func TestWorkerCrashWithRetry(t *testing.T) {
 	env := setupTest(t)
 	env.registerWorker(&hypervisor.RetryPolicy{MaxRetries: 1})
 
-	jobID := env.spawnJob("test-worker", map[string]any{"crash": "before_checkpoint"})
+	jobID := env.spawnJobWithLogs("test-worker", map[string]any{"crash": "before_checkpoint"})
 	t.Logf("Spawned crashing job with retry: %s", jobID)
-
-	// Stream logs from the process
-	cancelLogs := env.streamLogs(jobID)
-	defer cancelLogs()
 
 	result := env.waitForResult(jobID)
 	assert.Equal(t, 0, result.ExitCode, "expected success after retry")
@@ -309,12 +248,8 @@ func TestWorkerCrashAfterCheckpointWithRetry(t *testing.T) {
 	env := setupTest(t)
 	env.registerWorker(&hypervisor.RetryPolicy{MaxRetries: 1})
 
-	jobID := env.spawnJob("test-worker", map[string]any{"crash": "after_checkpoint"})
+	jobID := env.spawnJobWithLogs("test-worker", map[string]any{"crash": "after_checkpoint"})
 	t.Logf("Spawned crashing job with retry: %s", jobID)
-
-	// Stream logs from the process
-	cancelLogs := env.streamLogs(jobID)
-	defer cancelLogs()
 
 	result := env.waitForResult(jobID)
 	assert.Equal(t, 0, result.ExitCode, "expected success after retry")
@@ -330,12 +265,8 @@ func TestWorkerCrashExhaustsRetries(t *testing.T) {
 	env := setupTest(t)
 	env.registerWorker(&hypervisor.RetryPolicy{MaxRetries: 2})
 
-	jobID := env.spawnJob("test-worker", map[string]any{"crash": "always"})
+	jobID := env.spawnJobWithLogs("test-worker", map[string]any{"crash": "always"})
 	t.Logf("Spawned always-crashing job: %s", jobID)
-
-	// Stream logs from the process
-	cancelLogs := env.streamLogs(jobID)
-	defer cancelLogs()
 
 	result := env.waitForResult(jobID)
 	assert.Equal(t, 1, result.ExitCode, "expected exit code 1 after exhausting retries")
@@ -356,12 +287,8 @@ func TestDockerWorker(t *testing.T) {
 	// Worker adds 1 then doubles: (7 + 1) * 2 = 16
 	expectedResult := (inputNumber + 1) * 2
 
-	jobID := env.spawnJob("test-docker-worker", map[string]any{"number": inputNumber})
+	jobID := env.spawnJobWithLogs("test-docker-worker", map[string]any{"number": inputNumber})
 	t.Logf("Spawned Docker job: %s", jobID)
-
-	// Stream logs from the container
-	cancelLogs := env.streamLogs(jobID)
-	defer cancelLogs()
 
 	result := env.waitForResult(jobID)
 	assert.Equal(t, 0, result.ExitCode)
@@ -396,16 +323,12 @@ func TestDockerCheckpointRestore(t *testing.T) {
 
 	// Worker will checkpoint with 4s suspend only if within 3 seconds of spawn time.
 	// After the 4s suspend + restore, we'll be past the 3s window so checkpoint is skipped.
-	jobID := env.spawnJob("test-docker-worker", map[string]any{
+	jobID := env.spawnJobWithLogs("test-docker-worker", map[string]any{
 		"number":                         inputNumber,
 		"checkpoint_suspend_within_secs": 3, // Only checkpoint within 3s of spawn
 		"checkpoint_suspend_duration":    "4s",
 	})
 	t.Logf("Spawned Docker checkpoint/restore job: %s", jobID)
-
-	// Stream logs from the container
-	cancelLogs := env.streamLogs(jobID)
-	defer cancelLogs()
 
 	result := env.waitForResult(jobID)
 	assert.Equal(t, 0, result.ExitCode)

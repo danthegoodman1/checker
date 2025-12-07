@@ -43,8 +43,6 @@ type processHandle struct {
 	cmd            *exec.Cmd
 	config         *Config
 	apiHostAddress string
-	stdout         io.ReadCloser
-	stderr         io.ReadCloser
 }
 
 func (h *processHandle) String() string {
@@ -102,10 +100,6 @@ func (h *processHandle) Wait(ctx context.Context) (int, error) {
 	return 0, nil
 }
 
-func (h *processHandle) Logs(ctx context.Context) (io.ReadCloser, io.ReadCloser, error) {
-	return h.stdout, h.stderr, nil
-}
-
 // NewRuntime creates a new NodeJS runtime for macOS.
 func NewRuntime() *Runtime {
 	return &Runtime{}
@@ -136,22 +130,22 @@ func (r *Runtime) Start(ctx context.Context, opts runtime.StartOptions) (runtime
 		return nil, fmt.Errorf("invalid config type: expected *nodejs.Config, got %T", opts.Config)
 	}
 
-	return r.startProcess(ctx, opts.ExecutionID, opts.Env, cfg, opts.APIHostAddress)
+	return r.startProcess(ctx, opts.ExecutionID, opts.Env, cfg, opts.APIHostAddress, opts.Stdout, opts.Stderr)
 }
 
 // On macOS, this just restarts the process since CRIU is not available.
-func (r *Runtime) Restore(ctx context.Context, chk runtime.Checkpoint) (runtime.Process, error) {
-	c, ok := chk.(*checkpoint)
+func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (runtime.Process, error) {
+	c, ok := opts.Checkpoint.(*checkpoint)
 	if !ok {
-		return nil, fmt.Errorf("invalid checkpoint type: expected *checkpoint, got %T", chk)
+		return nil, fmt.Errorf("invalid checkpoint type: expected *checkpoint, got %T", opts.Checkpoint)
 	}
 
 	fmt.Printf("[darwin] restore requested for %s - no-op (restarting process, CRIU not available on macOS)\n", c.executionID)
 
-	return r.startProcess(ctx, c.executionID, c.env, c.config, c.apiHostAddress)
+	return r.startProcess(ctx, c.executionID, c.env, c.config, c.apiHostAddress, opts.Stdout, opts.Stderr)
 }
 
-func (r *Runtime) startProcess(ctx context.Context, executionID string, env map[string]string, cfg *Config, apiHostAddress string) (runtime.Process, error) {
+func (r *Runtime) startProcess(ctx context.Context, executionID string, env map[string]string, cfg *Config, apiHostAddress string, stdout, stderr io.Writer) (runtime.Process, error) {
 	nodePath := cfg.NodePath
 	if nodePath == "" {
 		nodePath = "node"
@@ -169,14 +163,17 @@ func (r *Runtime) startProcess(ctx context.Context, executionID string, env map[
 	cmd := exec.CommandContext(ctx, nodePath, args...)
 	cmd.Dir = workDir
 
-	// Create pipes for capturing stdout and stderr
-	// We use io.MultiWriter to write to both io.Discard (ensuring logs are always drained)
-	// and to our pipes (for optional capture via Logs())
-	stdoutReader, stdoutWriter := io.Pipe()
-	stderrReader, stderrWriter := io.Pipe()
-
-	cmd.Stdout = io.MultiWriter(io.Discard, stdoutWriter)
-	cmd.Stderr = io.MultiWriter(io.Discard, stderrWriter)
+	// Set up stdout/stderr - use provided writers or discard
+	if stdout != nil {
+		cmd.Stdout = stdout
+	} else {
+		cmd.Stdout = io.Discard
+	}
+	if stderr != nil {
+		cmd.Stderr = stderr
+	} else {
+		cmd.Stderr = io.Discard
+	}
 
 	// Set up environment
 	// For nodejs running directly on host, the API URL is the same as the host address
@@ -186,17 +183,8 @@ func (r *Runtime) startProcess(ctx context.Context, executionID string, env map[
 	}
 
 	if err := cmd.Start(); err != nil {
-		stdoutWriter.Close()
-		stderrWriter.Close()
 		return nil, fmt.Errorf("failed to start node process: %w", err)
 	}
-
-	// Close the write ends when the process exits
-	go func() {
-		cmd.Wait()
-		stdoutWriter.Close()
-		stderrWriter.Close()
-	}()
 
 	handle := &processHandle{
 		executionID:    executionID,
@@ -204,8 +192,6 @@ func (r *Runtime) startProcess(ctx context.Context, executionID string, env map[
 		cmd:            cmd,
 		config:         cfg,
 		apiHostAddress: apiHostAddress,
-		stdout:         stdoutReader,
-		stderr:         stderrReader,
 	}
 
 	return handle, nil

@@ -24,6 +24,10 @@ type JobRunner struct {
 	apiHostAddress string
 	logger         zerolog.Logger
 
+	// Stdout and Stderr writers for process output
+	stdout io.Writer
+	stderr io.Writer
+
 	// Done channel signals when the job has terminated
 	doneChan chan struct{}
 	doneOnce sync.Once
@@ -50,7 +54,7 @@ type JobRunner struct {
 	onFailure func(runner *JobRunner, exitCode int)
 }
 
-func NewJobRunner(job *Job, definition *JobDefinition, rt runtime.Runtime, config any, apiHostAddress string) *JobRunner {
+func NewJobRunner(job *Job, definition *JobDefinition, rt runtime.Runtime, config any, apiHostAddress string, stdout, stderr io.Writer) *JobRunner {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &JobRunner{
@@ -59,6 +63,8 @@ func NewJobRunner(job *Job, definition *JobDefinition, rt runtime.Runtime, confi
 		rt:             rt,
 		config:         config,
 		apiHostAddress: apiHostAddress,
+		stdout:         stdout,
+		stderr:         stderr,
 		logger:         logger.With().Str("job_id", job.ID).Logger(),
 		doneChan:       make(chan struct{}),
 		activeLocks:    make(map[string]time.Time),
@@ -73,6 +79,8 @@ func (r *JobRunner) Start() error {
 		Env:            r.job.Env,
 		Config:         r.config,
 		APIHostAddress: r.apiHostAddress,
+		Stdout:         r.stdout,
+		Stderr:         r.stderr,
 	})
 	if err != nil {
 		r.jobMu.Lock()
@@ -193,7 +201,11 @@ func (r *JobRunner) scheduleSuspendWake(wakeTime time.Time) {
 		r.jobMu.Unlock()
 
 		// Restore from checkpoint
-		process, err := r.rt.Restore(r.ctx, r.checkpoint)
+		process, err := r.rt.Restore(r.ctx, runtime.RestoreOptions{
+			Checkpoint: r.checkpoint,
+			Stdout:     r.stdout,
+			Stderr:     r.stderr,
+		})
 		if err != nil {
 			r.logger.Error().Err(err).Msg("failed to restore from checkpoint")
 			r.jobMu.Lock()
@@ -417,15 +429,6 @@ func (r *JobRunner) WaitForResult() <-chan struct{} {
 // Done returns a channel that is closed when the actor terminates.
 func (r *JobRunner) Done() <-chan struct{} {
 	return r.doneChan
-}
-
-// Logs returns separate io.ReadClosers for stdout and stderr from the process.
-// Returns nil, nil, nil if the process is not running or logs are not available.
-func (r *JobRunner) Logs(ctx context.Context) (io.ReadCloser, io.ReadCloser, error) {
-	if r.process == nil {
-		return nil, nil, nil
-	}
-	return r.process.Logs(ctx)
 }
 
 // Stop gracefully stops the actor.

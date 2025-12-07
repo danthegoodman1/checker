@@ -47,11 +47,6 @@ type Process interface {
 	// Wait blocks until the process exits and returns the exit code.
 	// Returns an error if the process cannot be waited on.
 	Wait(ctx context.Context) (exitCode int, err error)
-
-	// Logs returns separate io.ReadClosers for stdout and stderr streams.
-	// The caller is responsible for closing both readers when done.
-	// Either reader may be nil if that stream is not available.
-	Logs(ctx context.Context) (stdout io.ReadCloser, stderr io.ReadCloser, err error)
 }
 
 // StartOptions contains parameters for starting a new process.
@@ -70,6 +65,24 @@ type StartOptions struct {
 	// The runtime is responsible for making this accessible to the process
 	// (e.g., Docker will rewrite 127.0.0.1 to host.docker.internal).
 	APIHostAddress string
+
+	// Stdout is where process stdout will be written. If nil, stdout is discarded.
+	Stdout io.Writer
+
+	// Stderr is where process stderr will be written. If nil, stderr is discarded.
+	Stderr io.Writer
+}
+
+// RestoreOptions contains parameters for restoring a process from a checkpoint.
+type RestoreOptions struct {
+	// Checkpoint contains the data needed to restore the process.
+	Checkpoint Checkpoint
+
+	// Stdout is where process stdout will be written. If nil, stdout is discarded.
+	Stdout io.Writer
+
+	// Stderr is where process stderr will be written. If nil, stderr is discarded.
+	Stderr io.Writer
 }
 
 // Runtime is a factory that creates Process instances.
@@ -88,7 +101,7 @@ type Runtime interface {
 
 	// Restore resumes an execution from a checkpoint.
 	// Returns a new Process representing the restored execution.
-	Restore(ctx context.Context, checkpoint Checkpoint) (Process, error)
+	Restore(ctx context.Context, opts RestoreOptions) (Process, error)
 
 	// CheckpointGracePeriodMs returns the grace period in milliseconds that workers
 	// should wait after receiving a checkpoint response before the runtime stops the process.
