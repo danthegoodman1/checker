@@ -44,3 +44,4 @@ Workflows also risk creating massive event histories that slow down recovery and
 - RWMutex for async work
 - Signal listening for async wake-up
 - Runtime suspension for resource-efficient sleeping and signal listening
+- Multiple runtime types supported: Docker, Firecracker VMs, Unikernel (Firecracker & QEMU), binary with CRIU
