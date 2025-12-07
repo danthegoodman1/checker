@@ -22,7 +22,36 @@ async function checkpoint(suspendDuration) {
   return resp.json()
 }
 
+async function exit(exitCode, output) {
+  const resp = await fetch(`http://${apiUrl}/jobs/${jobId}/exit`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ exit_code: exitCode, output }),
+  })
+  if (!resp.ok) {
+    throw new Error(`Exit failed: ${resp.status} ${await resp.text()}`)
+  }
+  process.exit(exitCode)
+}
+
+async function getParams() {
+  const resp = await fetch(`http://${apiUrl}/jobs/${jobId}/params`)
+  if (!resp.ok) {
+    throw new Error(`Get params failed: ${resp.status} ${await resp.text()}`)
+  }
+  return resp.json()
+}
+
 async function main() {
+  const params = await getParams()
+  console.log("Received params:", JSON.stringify(params))
+
+  // Check for crash simulation
+  if (params.crash === "before_checkpoint") {
+    console.log("Simulating crash before checkpoint...")
+    nonExistentFunction()
+  }
+
   console.log("Step 1: Starting work...")
   const step1Result = { step: 1, value: 2 + 2 }
   console.log("Step 1 complete:", step1Result)
@@ -31,15 +60,20 @@ async function main() {
   const checkpointResult = await checkpoint()
   console.log("Checkpoint complete:", JSON.stringify(checkpointResult))
 
+  if (params.crash === "after_checkpoint") {
+    console.log("Simulating crash after checkpoint...")
+    nonExistentFunction()
+  }
+
   console.log("Step 2: Continuing after checkpoint...")
   const step2Result = { step: 2, value: step1Result.value * 2 }
   console.log("Step 2 complete:", step2Result)
 
   console.log("Worker finished successfully")
-  process.exit(0)
+  await exit(0, { result: step2Result })
 }
 
 main().catch((err) => {
   console.error("Worker error:", err)
-  process.exit(1)
+  exit(1, { error: err.message })
 })
