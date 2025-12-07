@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	goruntime "runtime"
 	"sync"
 	"time"
 
@@ -178,6 +179,8 @@ func (h *Hypervisor) Spawn(ctx context.Context, opts SpawnOptions) (string, erro
 	env["CHECKER_JOB_DEFINITION_NAME"] = jd.Name
 	env["CHECKER_JOB_DEFINITION_VERSION"] = jd.Version
 	env["CHECKER_JOB_SPAWNED_AT"] = fmt.Sprintf("%d", time.Now().Unix())
+	env["CHECKER_ARCH"] = goruntime.GOARCH // amd64, arm64
+	env["CHECKER_OS"] = goruntime.GOOS     // linux, darwin, windows
 
 	job := &Job{
 		ID:                jobID,
