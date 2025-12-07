@@ -242,6 +242,10 @@ func TestRunJSWorkerViaHTTPAPI(t *testing.T) {
 	jobID := env.spawnJob("test-worker", map[string]any{"number": inputNumber})
 	t.Logf("Spawned job: %s", jobID)
 
+	// Stream logs from the process
+	cancelLogs := env.streamLogs(jobID)
+	defer cancelLogs()
+
 	result := env.waitForResult(jobID)
 	assert.Equal(t, 0, result.ExitCode)
 	t.Logf("Job completed with exit code: %d, output: %s", result.ExitCode, string(result.Output))
@@ -268,6 +272,10 @@ func TestWorkerCrashNoRetry(t *testing.T) {
 	jobID := env.spawnJob("test-worker", map[string]any{"crash": "before_checkpoint"})
 	t.Logf("Spawned crashing job: %s", jobID)
 
+	// Stream logs from the process
+	cancelLogs := env.streamLogs(jobID)
+	defer cancelLogs()
+
 	result := env.waitForResult(jobID)
 	assert.NotEqual(t, 0, result.ExitCode, "expected non-zero exit code for crash")
 	t.Logf("Crashed job exit code: %d", result.ExitCode)
@@ -283,6 +291,10 @@ func TestWorkerCrashWithRetry(t *testing.T) {
 
 	jobID := env.spawnJob("test-worker", map[string]any{"crash": "before_checkpoint"})
 	t.Logf("Spawned crashing job with retry: %s", jobID)
+
+	// Stream logs from the process
+	cancelLogs := env.streamLogs(jobID)
+	defer cancelLogs()
 
 	result := env.waitForResult(jobID)
 	assert.Equal(t, 0, result.ExitCode, "expected success after retry")
@@ -300,6 +312,10 @@ func TestWorkerCrashAfterCheckpointWithRetry(t *testing.T) {
 	jobID := env.spawnJob("test-worker", map[string]any{"crash": "after_checkpoint"})
 	t.Logf("Spawned crashing job with retry: %s", jobID)
 
+	// Stream logs from the process
+	cancelLogs := env.streamLogs(jobID)
+	defer cancelLogs()
+
 	result := env.waitForResult(jobID)
 	assert.Equal(t, 0, result.ExitCode, "expected success after retry")
 	t.Logf("Job completed with exit code: %d, output: %s", result.ExitCode, string(result.Output))
@@ -316,6 +332,10 @@ func TestWorkerCrashExhaustsRetries(t *testing.T) {
 
 	jobID := env.spawnJob("test-worker", map[string]any{"crash": "always"})
 	t.Logf("Spawned always-crashing job: %s", jobID)
+
+	// Stream logs from the process
+	cancelLogs := env.streamLogs(jobID)
+	defer cancelLogs()
 
 	result := env.waitForResult(jobID)
 	assert.Equal(t, 1, result.ExitCode, "expected exit code 1 after exhausting retries")

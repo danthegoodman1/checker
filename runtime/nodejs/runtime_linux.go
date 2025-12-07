@@ -48,6 +48,8 @@ type processHandle struct {
 	config         *Config
 	checkpointDir  string
 	apiHostAddress string
+	stdout         io.ReadCloser
+	stderr         io.ReadCloser
 }
 
 func (h *processHandle) String() string {
@@ -124,9 +126,7 @@ func (h *processHandle) Wait(ctx context.Context) (int, error) {
 }
 
 func (h *processHandle) Logs(ctx context.Context) (io.ReadCloser, io.ReadCloser, error) {
-	// NodeJS runtime currently pipes directly to os.Stdout/os.Stderr
-	// Logs are not captured separately
-	return nil, nil, nil
+	return h.stdout, h.stderr, nil
 }
 
 // NewRuntime creates a new NodeJS runtime for Linux.
@@ -221,8 +221,15 @@ func (r *Runtime) startProcess(ctx context.Context, executionID string, env map[
 
 	cmd := exec.CommandContext(ctx, nodePath, args...)
 	cmd.Dir = workDir
-	cmd.Stdout = os.Stdout // TODO: capture output properly
-	cmd.Stderr = os.Stderr
+
+	// Create pipes for capturing stdout and stderr
+	// We use io.MultiWriter to write to both io.Discard (ensuring logs are always drained)
+	// and to our pipes (for optional capture via Logs())
+	stdoutReader, stdoutWriter := io.Pipe()
+	stderrReader, stderrWriter := io.Pipe()
+
+	cmd.Stdout = io.MultiWriter(io.Discard, stdoutWriter)
+	cmd.Stderr = io.MultiWriter(io.Discard, stderrWriter)
 
 	// Set up environment
 	// For nodejs running directly on host, the API URL is the same as the host address
@@ -237,8 +244,17 @@ func (r *Runtime) startProcess(ctx context.Context, executionID string, env map[
 	}
 
 	if err := cmd.Start(); err != nil {
+		stdoutWriter.Close()
+		stderrWriter.Close()
 		return nil, fmt.Errorf("failed to start node process: %w", err)
 	}
+
+	// Close the write ends when the process exits
+	go func() {
+		cmd.Wait()
+		stdoutWriter.Close()
+		stderrWriter.Close()
+	}()
 
 	handle := &processHandle{
 		executionID:    executionID,
@@ -248,6 +264,8 @@ func (r *Runtime) startProcess(ctx context.Context, executionID string, env map[
 		config:         cfg,
 		checkpointDir:  checkpointDir,
 		apiHostAddress: apiHostAddress,
+		stdout:         stdoutReader,
+		stderr:         stderrReader,
 	}
 
 	return handle, nil
