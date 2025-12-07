@@ -40,7 +40,7 @@ type CustomValidator struct {
 }
 
 // Start an HTTP server on the given TCP and QUIC addresses. Leave quicAddr empty to disable QUIC.
-func StartHTTPServer(tcpAddr string, quicAddr string) *HTTPServer {
+func StartHTTPServer(tcpAddr string, quicAddr string, registerRoutes func(*echo.Echo)) *HTTPServer {
 	listener, err := net.Listen("tcp", tcpAddr)
 	if err != nil {
 		logger.Error().Err(err).Msg("error creating tcp listener, exiting")
@@ -61,6 +61,7 @@ func StartHTTPServer(tcpAddr string, quicAddr string) *HTTPServer {
 
 	// technical - no auth
 	s.Echo.GET("/hc", s.HealthCheck)
+	registerRoutes(s.Echo)
 
 	s.Echo.Listener = listener
 	go func() {
