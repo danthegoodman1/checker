@@ -20,9 +20,9 @@ This allows you to write the "quick and dirty script" to keep your code short an
 
 Workflows are great for saga patterns—a clear sequence of steps with arbitrary delays between them. But they can be a minefield in a meadow: they look elegant until you step on the hidden landmines.
 
-Event histories grow painfully large if you poll anything. Every parameter you pass or return must be serializable. You constantly worry about determinism violations. And wiring activities to the right workers on the right queues adds operational complexity that's easy to get wrong.
+Event histories grow painfully large if you poll anything. Every parameter you pass or return must be serializable. You constantly worry about determinism violations. And wiring activities to the right workers on the right queues adds operational complexity that's easy to get wrong. You have to use special versions of concurrency primitives instead of the ones designed for the language.
 
-With memory checkpointing, you just write normal code and sprinkle in `checkpoint()` calls. No event history, no determinism rules, no serializability headaches, no activity wiring. And recovery is predictable — you resume from the last checkpoint, exactly where you'd expect.
+With memory checkpointing, you just write normal code and sprinkle in `checkpoint()` calls. No event history, no determinism rules, no serializability headaches, no activity wiring, no special versions of Promise.all() or Go channels. And recovery is predictable — you resume from the last checkpoint, exactly where you'd expect.
 
 ### Example
 
@@ -41,4 +41,6 @@ Workflows also risk creating massive event histories that slow down recovery and
 ## Features
 
 - Memory checkpoints defined in the code
-- RWMutex for
+- RWMutex for async work
+- Signal listening for async wake-up
+- Runtime suspension for resource-efficient sleeping and signal listening
