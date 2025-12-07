@@ -200,3 +200,19 @@ func TestWorkerCrashAfterCheckpointWithRetry(t *testing.T) {
 	// First run: checkpoint then crash. Second run: checkpoint then success = 2 checkpoints total
 	assert.Equal(t, float64(2), job["CheckpointCount"], "expected 2 checkpoints (1 per attempt)")
 }
+
+func TestWorkerCrashExhaustsRetries(t *testing.T) {
+	env := setupTest(t)
+	env.registerWorker(&hypervisor.RetryPolicy{MaxRetries: 2})
+
+	jobID := env.spawnJob(map[string]any{"crash": "always"})
+	t.Logf("Spawned always-crashing job: %s", jobID)
+
+	result := env.waitForResult(jobID)
+	assert.Equal(t, 1, result.ExitCode, "expected exit code 1 after exhausting retries")
+	t.Logf("Job failed with exit code: %d", result.ExitCode)
+
+	job := env.getJob(jobID)
+	assert.Equal(t, float64(2), job["RetryCount"], "expected 2 retries (exhausted)")
+	assert.Equal(t, "failed", job["State"], "expected failed state")
+}

@@ -62,6 +62,12 @@ async function main() {
     nonExistentFunction()
   }
 
+  // Always crash mode - crashes on every attempt (for testing retry exhaustion)
+  if (params.crash === "always") {
+    console.log(`Simulating crash (always mode, retry_count=${metadata.retry_count})...`)
+    nonExistentFunction()
+  }
+
   console.log("Step 1: Starting work...")
   const step1Result = { step: 1, value: 2 + 2 }
   console.log("Step 1 complete:", step1Result)
