@@ -1,6 +1,11 @@
 // Test worker for checkpoint/restore functionality
 // Uses time-based logic to checkpoint with suspend on first run,
 // then skip checkpoint after restore (to avoid infinite loops on macOS).
+//
+// On Linux with real CRIU: in-memory state is preserved across checkpoint/restore,
+// so preCheckpointRuns will be 1 (code before checkpoint runs only once).
+// On macOS (workaround): container restarts from scratch, so preCheckpointRuns
+// will be 2 (code before checkpoint runs twice - once per container start).
 
 const jobId = process.env.CHECKER_JOB_ID || "unknown"
 const defName = process.env.CHECKER_JOB_DEFINITION_NAME || "unknown"
@@ -9,6 +14,11 @@ const apiUrl = process.env.CHECKER_API_URL
 const spawnedAt = process.env.CHECKER_JOB_SPAWNED_AT
   ? parseInt(process.env.CHECKER_JOB_SPAWNED_AT, 10)
   : null
+
+// Track how many times the pre-checkpoint code runs.
+// With real CRIU (Linux), this stays at 1 because state is preserved.
+// With macOS workaround, this becomes 2 because container restarts from scratch.
+let preCheckpointRuns = 0
 
 console.log(
   `Checkpoint restore test worker starting... Job ID: ${jobId}, Definition: ${defName}@${defVersion}`
@@ -73,6 +83,12 @@ async function main() {
   const checkpointWithinSecs = params.checkpoint_within_secs ?? 3
   const suspendDuration = params.suspend_duration ?? "4s"
 
+  // Increment pre-checkpoint run counter BEFORE any checkpoint logic.
+  // With real CRIU (Linux), this only runs once because state is restored.
+  // With macOS workaround, this runs twice because container restarts from scratch.
+  preCheckpointRuns++
+  console.log(`Pre-checkpoint code run count: ${preCheckpointRuns}`)
+
   console.log("Step 1: Adding 1 to input...")
   const step1Result = { step: 1, value: inputNumber + 1 }
   console.log("Step 1 complete:", step1Result)
@@ -107,9 +123,11 @@ async function main() {
   console.log("Step 2 complete:", step2Result)
 
   console.log("Checkpoint restore test completed successfully")
+  console.log(`Final pre-checkpoint run count: ${preCheckpointRuns}`)
   await exit(0, {
     result: step2Result,
     checkpoint_skipped: checkpointSkipped,
+    pre_checkpoint_runs: preCheckpointRuns,
   })
 }
 

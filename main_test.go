@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -416,10 +417,25 @@ func TestDockerCheckpointRestore(t *testing.T) {
 			Value int `json:"value"`
 		} `json:"result"`
 		CheckpointSkipped bool `json:"checkpoint_skipped"`
+		PreCheckpointRuns int  `json:"pre_checkpoint_runs"`
 	}
 	require.NoError(t, json.Unmarshal(result.Output, &restoreOutput))
 	assert.Equal(t, expectedResult, restoreOutput.Result.Value, "expected (input + 1) * 2")
-	t.Logf("Input: %d, Output: %d, CheckpointSkipped: %v", inputNumber, restoreOutput.Result.Value, restoreOutput.CheckpointSkipped)
+	t.Logf("Input: %d, Output: %d, CheckpointSkipped: %v, PreCheckpointRuns: %d",
+		inputNumber, restoreOutput.Result.Value, restoreOutput.CheckpointSkipped, restoreOutput.PreCheckpointRuns)
+
+	// Verify state preservation behavior differs between Linux (real CRIU) and macOS (workaround)
+	if goruntime.GOOS == "linux" {
+		// On Linux with real CRIU: in-memory state is preserved across checkpoint/restore,
+		// so code before checkpoint only executes once
+		assert.Equal(t, 1, restoreOutput.PreCheckpointRuns,
+			"with real CRIU checkpoint, pre-checkpoint code should only run once (state preserved)")
+	} else {
+		// On macOS: checkpoint just stops/starts the container without preserving state,
+		// so the process restarts from scratch and pre-checkpoint code runs twice
+		assert.Equal(t, 2, restoreOutput.PreCheckpointRuns,
+			"with macOS workaround, pre-checkpoint code runs twice (container restarts)")
+	}
 
 	job := env.getJob(jobID)
 	// On macOS: first run checkpoints (stops container), suspend timer restores it,
