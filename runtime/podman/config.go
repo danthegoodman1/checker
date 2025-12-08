@@ -1,12 +1,12 @@
-package docker
+package podman
 
 import "github.com/go-playground/validator/v10"
 
 var validate = validator.New()
 
-// Config holds the configuration for a Docker runtime execution.
+// Config holds the configuration for a Podman runtime execution.
 type Config struct {
-	// Image is the Docker image to run.
+	// Image is the container image to run.
 	// Required. Can be a full image reference (e.g., "node:20-alpine") or local image name.
 	Image string `json:"image" validate:"required"`
 
@@ -30,8 +30,9 @@ type Config struct {
 	// Example: ["8080:80", "443"]
 	Ports []string `json:"ports"`
 
-	// Network is the Docker network to connect the container to.
-	// If empty, uses the default bridge network.
+	// Network is the network mode for the container.
+	// Common values: "host", "bridge", "slirp4netns" (rootless), "none".
+	// For checkpoint/restore, "host" is recommended to avoid network namespace issues.
 	Network string `json:"network"`
 
 	// Memory is the memory limit for the container (e.g., "512m", "1g").
@@ -49,9 +50,10 @@ type Config struct {
 	// Labels are additional labels to add to the container.
 	Labels map[string]string `json:"labels"`
 
-	// Remove determines whether to automatically remove the container when it exits.
-	// Default is false to allow checkpoint/restore.
-	Remove bool `json:"remove"`
+	// CheckpointDir is the directory where checkpoint tar files will be exported.
+	// If empty, defaults to /tmp/checker/podman-checkpoints/<execution-id>/
+	// Checkpoints are portable and can be moved to other nodes for restore.
+	CheckpointDir string `json:"checkpoint_dir"`
 }
 
 func (c *Config) Validate() error {
