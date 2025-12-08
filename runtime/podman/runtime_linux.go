@@ -96,6 +96,20 @@ func (h *processHandle) Checkpoint(ctx context.Context, keepRunning bool) (runti
 		Str("export_path", exportPath).
 		Msg("checkpoint created and exported")
 
+	// If not keeping running, remove the old container so restore can reuse the name/ID
+	if !keepRunning {
+		// Cancel log streaming first
+		if h.logCancel != nil {
+			h.logCancel()
+		}
+		rmCmd := exec.CommandContext(ctx, "podman", "rm", "-f", h.containerID)
+		if rmErr := rmCmd.Run(); rmErr != nil {
+			h.logger.Warn().Err(rmErr).Msg("failed to remove container after checkpoint")
+		} else {
+			h.logger.Debug().Msg("removed container after checkpoint")
+		}
+	}
+
 	return &podmanCheckpoint{
 		executionID:    h.executionID,
 		containerID:    h.containerID,
