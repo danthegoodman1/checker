@@ -257,19 +257,23 @@ func (r *JobRunner) GetCheckpointGracePeriod() int64 {
 // Checkpoint requests a checkpoint of the job.
 func (r *JobRunner) Checkpoint(ctx context.Context, suspendDuration time.Duration) (*Job, error) {
 	// Check if already terminal
-	if _, err := func() (*Job, error) {
-		r.jobMu.RLock()
-		defer r.jobMu.RUnlock()
-		if r.job.IsTerminal() {
-			return nil, fmt.Errorf("job has terminated")
-		}
-		return nil, nil
-	}(); err != nil {
-		return nil, err
+	r.jobMu.RLock()
+	isTerminal := r.job.IsTerminal()
+	r.jobMu.RUnlock()
+	if isTerminal {
+		return nil, fmt.Errorf("job has terminated")
 	}
 
-	// Acquire write lock - blocks until all read locks are released
-	r.checkpointMu.Lock()
+	// Try to acquire write lock - if we can't, a checkpoint is already in progress.
+	// In that case, we collapse/ignore this request since the caller already received
+	// the grace period response and will wait appropriately.
+	if !r.checkpointMu.TryLock() {
+		r.logger.Debug().Msg("checkpoint already in progress, collapsing request")
+		r.jobMu.RLock()
+		job := r.job.Clone()
+		r.jobMu.RUnlock()
+		return job, nil
+	}
 	defer r.checkpointMu.Unlock()
 
 	keepRunning := suspendDuration == 0
