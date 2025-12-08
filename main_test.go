@@ -75,11 +75,43 @@ func setupTest(t *testing.T) *testEnv {
 }
 
 func setupDockerTest(t *testing.T) *testEnv {
-	env := setupTestBase(t)
+	// On Linux, Docker containers access the host via host-gateway (docker bridge IP),
+	// so the runtime API must bind to 0.0.0.0 to be reachable from containers.
+	// On macOS, Docker Desktop handles host.docker.internal specially, so 127.0.0.1 works.
+	port := portCounter.Add(2)
+	callerAddr := fmt.Sprintf("127.0.0.1:%d", port)
+	var runtimeAddr string
+	if goruntime.GOOS == "linux" {
+		runtimeAddr = fmt.Sprintf("0.0.0.0:%d", port+1)
+	} else {
+		runtimeAddr = fmt.Sprintf("127.0.0.1:%d", port+1)
+	}
 
-	// Build the Docker image from the demo directory
+	h := hypervisor.New(hypervisor.Config{
+		CallerHTTPAddress:  callerAddr,
+		RuntimeHTTPAddress: runtimeAddr,
+	})
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		assert.NoError(t, h.Shutdown(ctx))
+	})
+
+	time.Sleep(100 * time.Millisecond)
+
 	cwd, err := os.Getwd()
 	require.NoError(t, err)
+
+	env := &testEnv{
+		t:          t,
+		h:          h,
+		baseURL:    fmt.Sprintf("http://%s", callerAddr),
+		client:     &http.Client{Timeout: 60 * time.Second},
+		workerPath: filepath.Join(cwd, "demo", "worker.js"),
+	}
+
+	// Build the Docker image from the demo directory
 	demoDir := filepath.Join(cwd, "demo")
 
 	cmd := exec.Command("docker", "build", "-t", "checker-worker-test:latest", demoDir)
