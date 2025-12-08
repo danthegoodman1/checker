@@ -309,24 +309,100 @@ func TestDockerWorker(t *testing.T) {
 	t.Logf("Docker job checkpoint count: %v", job["CheckpointCount"])
 }
 
+// TestDockerCheckpointLock tests that the checkpoint lock prevents checkpointing
+// until the lock is released. The worker takes a lock, schedules a release after
+// a delay, and immediately tries to checkpoint. The checkpoint should be blocked
+// until the lock is released.
+func TestDockerCheckpointLock(t *testing.T) {
+	env := setupDockerTest(t)
+
+	// Build the checkpoint lock test image
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	demoDir := filepath.Join(cwd, "demo")
+
+	cmd := exec.Command("docker", "build", "-t", "checker-checkpoint-lock-test:latest", "-f", filepath.Join(demoDir, "Dockerfile.checkpoint_lock"), demoDir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to build checkpoint lock test image: %v\n%s", err, output)
+	}
+
+	// Register the checkpoint lock test worker
+	env.registerWorkerWithConfig("test-checkpoint-lock", "1.0.0", runtime.RuntimeTypeDocker, map[string]any{
+		"image": "checker-checkpoint-lock-test:latest",
+	}, nil)
+
+	lockHoldMs := 2000 // Hold lock for 2 seconds
+
+	jobID := env.spawnJobWithLogs("test-checkpoint-lock", map[string]any{
+		"lock_hold_ms": lockHoldMs,
+	})
+	t.Logf("Spawned Docker checkpoint lock test job: %s", jobID)
+
+	result := env.waitForResult(jobID)
+	assert.Equal(t, 0, result.ExitCode)
+	t.Logf("Docker job completed with exit code: %d, output: %s", result.ExitCode, string(result.Output))
+
+	var lockTestOutput struct {
+		LockHoldMs           int  `json:"lock_hold_ms"`
+		CheckpointDurationMs int  `json:"checkpoint_duration_ms"`
+		WasBlocked           bool `json:"was_blocked"`
+	}
+	require.NoError(t, json.Unmarshal(result.Output, &lockTestOutput))
+
+	t.Logf("Checkpoint lock test results: lock_hold_ms=%d, checkpoint_duration_ms=%d, was_blocked=%v",
+		lockTestOutput.LockHoldMs,
+		lockTestOutput.CheckpointDurationMs,
+		lockTestOutput.WasBlocked)
+
+	// Verify the checkpoint was actually blocked by the lock
+	assert.True(t, lockTestOutput.WasBlocked,
+		"checkpoint should have been blocked by lock (duration=%dms, expected >=%dms)",
+		lockTestOutput.CheckpointDurationMs,
+		lockHoldMs)
+
+	// Verify the checkpoint duration was at least the lock hold time
+	assert.GreaterOrEqual(t, lockTestOutput.CheckpointDurationMs, lockHoldMs,
+		"checkpoint duration should be >= %dms (lock hold time)", lockHoldMs)
+
+	job := env.getJob(jobID)
+	assert.Equal(t, float64(1), job["CheckpointCount"])
+	t.Logf("Docker job checkpoint count: %v", job["CheckpointCount"])
+}
+
 // TestDockerCheckpointRestore tests checkpoint with suspend_duration, then restore after delay.
 // On macOS, checkpoint just stops/starts the container. To avoid infinite loops,
 // we use the CHECKER_JOB_SPAWNED_AT env var (set by hypervisor) combined with
-// checkpoint_suspend_within_secs param. Worker only checkpoints if within that window.
+// checkpoint_within_secs param. Worker only checkpoints if within that window.
 // After restore, enough time has passed so checkpoint is skipped.
 func TestDockerCheckpointRestore(t *testing.T) {
 	env := setupDockerTest(t)
-	env.registerDockerWorker(nil)
+
+	// Build the checkpoint restore test image
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	demoDir := filepath.Join(cwd, "demo")
+
+	cmd := exec.Command("docker", "build", "-t", "checker-checkpoint-restore-test:latest", "-f", filepath.Join(demoDir, "Dockerfile.checkpoint_restore"), demoDir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to build checkpoint restore test image: %v\n%s", err, output)
+	}
+
+	// Register the checkpoint restore test worker
+	env.registerWorkerWithConfig("test-checkpoint-restore", "1.0.0", runtime.RuntimeTypeDocker, map[string]any{
+		"image": "checker-checkpoint-restore-test:latest",
+	}, nil)
 
 	inputNumber := 10
 	expectedResult := (inputNumber + 1) * 2
 
 	// Worker will checkpoint with 4s suspend only if within 3 seconds of spawn time.
 	// After the 4s suspend + restore, we'll be past the 3s window so checkpoint is skipped.
-	jobID := env.spawnJobWithLogs("test-docker-worker", map[string]any{
-		"number":                         inputNumber,
-		"checkpoint_suspend_within_secs": 3, // Only checkpoint within 3s of spawn
-		"checkpoint_suspend_duration":    "4s",
+	jobID := env.spawnJobWithLogs("test-checkpoint-restore", map[string]any{
+		"number":                inputNumber,
+		"checkpoint_within_secs": 3, // Only checkpoint within 3s of spawn
+		"suspend_duration":       "4s",
 	})
 	t.Logf("Spawned Docker checkpoint/restore job: %s", jobID)
 
@@ -334,16 +410,16 @@ func TestDockerCheckpointRestore(t *testing.T) {
 	assert.Equal(t, 0, result.ExitCode)
 	t.Logf("Docker job completed with exit code: %d, output: %s", result.ExitCode, string(result.Output))
 
-	var output struct {
+	var restoreOutput struct {
 		Result struct {
 			Step  int `json:"step"`
 			Value int `json:"value"`
 		} `json:"result"`
 		CheckpointSkipped bool `json:"checkpoint_skipped"`
 	}
-	require.NoError(t, json.Unmarshal(result.Output, &output))
-	assert.Equal(t, expectedResult, output.Result.Value, "expected (input + 1) * 2")
-	t.Logf("Input: %d, Output: %d, CheckpointSkipped: %v", inputNumber, output.Result.Value, output.CheckpointSkipped)
+	require.NoError(t, json.Unmarshal(result.Output, &restoreOutput))
+	assert.Equal(t, expectedResult, restoreOutput.Result.Value, "expected (input + 1) * 2")
+	t.Logf("Input: %d, Output: %d, CheckpointSkipped: %v", inputNumber, restoreOutput.Result.Value, restoreOutput.CheckpointSkipped)
 
 	job := env.getJob(jobID)
 	// On macOS: first run checkpoints (stops container), suspend timer restores it,

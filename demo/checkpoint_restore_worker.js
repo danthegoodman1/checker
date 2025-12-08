@@ -1,21 +1,18 @@
-// Demo worker script for testing the checker hypervisor
+// Test worker for checkpoint/restore functionality
+// Uses time-based logic to checkpoint with suspend on first run,
+// then skip checkpoint after restore (to avoid infinite loops on macOS).
 
 const jobId = process.env.CHECKER_JOB_ID || "unknown"
 const defName = process.env.CHECKER_JOB_DEFINITION_NAME || "unknown"
 const defVersion = process.env.CHECKER_JOB_DEFINITION_VERSION || "unknown"
 const apiUrl = process.env.CHECKER_API_URL
-
-const arch = process.env.CHECKER_ARCH || "unknown"
-const os = process.env.CHECKER_OS || "unknown"
-
-// Node.js detected values
-const nodeArch = process.arch // e.g., 'x64', 'arm64'
-const nodePlatform = process.platform // e.g., 'linux', 'darwin', 'win32'
+const spawnedAt = process.env.CHECKER_JOB_SPAWNED_AT
+  ? parseInt(process.env.CHECKER_JOB_SPAWNED_AT, 10)
+  : null
 
 console.log(
-  `Worker starting... Job ID: ${jobId}, Definition: ${defName}@${defVersion}`
+  `Checkpoint restore test worker starting... Job ID: ${jobId}, Definition: ${defName}@${defVersion}`
 )
-console.log(`  Hypervisor: ${os}/${arch}, Worker: ${nodePlatform}/${nodeArch}`)
 
 async function checkpoint(suspendDuration) {
   const body = suspendDuration ? { suspend_duration: suspendDuration } : {}
@@ -61,54 +58,52 @@ async function getParams() {
   return resp.json()
 }
 
-async function getMetadata() {
-  const resp = await fetch(`http://${apiUrl}/jobs/${jobId}/metadata`)
-  if (!resp.ok) {
-    throw new Error(`Get metadata failed: ${resp.status} ${await resp.text()}`)
-  }
-  return resp.json()
-}
-
 async function main() {
   const params = await getParams()
-  const metadata = await getMetadata()
   console.log("Received params:", JSON.stringify(params))
-  console.log("Received metadata:", JSON.stringify(metadata))
-
-  // Check for crash simulation - only crash if retry_count is 0
-  if (params.crash === "before_checkpoint" && metadata.retry_count === 0) {
-    console.log("Simulating crash before checkpoint (retry_count=0)...")
-    nonExistentFunction()
-  }
-
-  // Always crash mode - crashes on every attempt (for testing retry exhaustion)
-  if (params.crash === "always") {
-    console.log(
-      `Simulating crash (always mode, retry_count=${metadata.retry_count})...`
-    )
-    nonExistentFunction()
-  }
 
   const inputNumber = params.number ?? 0
+  const checkpointWithinSecs = params.checkpoint_within_secs ?? 3
+  const suspendDuration = params.suspend_duration ?? "4s"
+
   console.log("Step 1: Adding 1 to input...")
   const step1Result = { step: 1, value: inputNumber + 1 }
   console.log("Step 1 complete:", step1Result)
 
-  console.log("Checkpointing...")
-  const checkpointResult = await checkpoint()
-  console.log("Checkpoint complete:", JSON.stringify(checkpointResult))
+  // Time-based checkpoint logic to prevent infinite loops on macOS
+  // (where checkpoint just stops/starts the container without preserving state)
+  // Only checkpoint if within the time window since spawn
+  let checkpointSkipped = false
+  const nowSeconds = Math.floor(Date.now() / 1000)
 
-  if (params.crash === "after_checkpoint" && metadata.retry_count === 0) {
-    console.log("Simulating crash after checkpoint (retry_count=0)...")
-    nonExistentFunction()
+  if (spawnedAt === null) {
+    console.log("Warning: CHECKER_JOB_SPAWNED_AT not set, skipping checkpoint")
+    checkpointSkipped = true
+  } else {
+    const cutoffTime = spawnedAt + checkpointWithinSecs
+    if (nowSeconds <= cutoffTime) {
+      console.log(
+        `Time check: now=${nowSeconds}, spawnedAt=${spawnedAt}, cutoff=${cutoffTime} -> checkpointing with suspend`
+      )
+      const checkpointResult = await checkpoint(suspendDuration)
+      console.log("Checkpoint complete:", JSON.stringify(checkpointResult))
+    } else {
+      console.log(
+        `Time check: now=${nowSeconds}, spawnedAt=${spawnedAt}, cutoff=${cutoffTime} -> skipping (restored after cutoff)`
+      )
+      checkpointSkipped = true
+    }
   }
 
   console.log("Step 2: Doubling the value...")
   const step2Result = { step: 2, value: step1Result.value * 2 }
   console.log("Step 2 complete:", step2Result)
 
-  console.log("Worker finished successfully")
-  await exit(0, { result: step2Result })
+  console.log("Checkpoint restore test completed successfully")
+  await exit(0, {
+    result: step2Result,
+    checkpoint_skipped: checkpointSkipped,
+  })
 }
 
 main().catch((err) => {
