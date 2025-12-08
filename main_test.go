@@ -423,8 +423,10 @@ func TestDockerCheckpointRestore(t *testing.T) {
 	}
 
 	// Register the checkpoint restore test worker
+	// Use host network to avoid network namespace issues with checkpoint/restore
 	env.registerWorkerWithConfig("test-checkpoint-restore", "1.0.0", runtime.RuntimeTypeDocker, map[string]any{
-		"image": "checker-checkpoint-restore-test:latest",
+		"image":   "checker-checkpoint-restore-test:latest",
+		"network": "host",
 	}, nil)
 
 	inputNumber := 10
