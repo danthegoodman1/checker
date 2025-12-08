@@ -22,11 +22,11 @@ func (h *Hypervisor) RegisterRuntimeAPI(e *echo.Echo) {
 type CheckpointJobRequest struct {
 	ID              string `param:"id" validate:"required"`
 	SuspendDuration string `json:"suspend_duration"`
+	Token           string `json:"token" validate:"required"` // Idempotency token for retry after restore
 }
 
 type CheckpointJobResponse struct {
-	Job           *Job  `json:"job"`
-	GracePeriodMs int64 `json:"grace_period_ms,omitempty"`
+	Job *Job `json:"job"`
 }
 
 func (h *Hypervisor) handleCheckpointJob(c echo.Context) error {
@@ -44,30 +44,18 @@ func (h *Hypervisor) handleCheckpointJob(c echo.Context) error {
 		}
 	}
 
-	// Get the grace period before checkpointing
-	gracePeriodMs, err := h.GetCheckpointGracePeriod(req.ID)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusNotFound, err.Error())
-	}
-
-	// Send the response first with the grace period.
-	// The worker will wait for this grace period, ensuring it's idle when we checkpoint.
-	if err := c.JSON(http.StatusOK, CheckpointJobResponse{GracePeriodMs: gracePeriodMs}); err != nil {
-		return err
-	}
-
-	// Now perform the actual checkpoint.
-	// Use a background context since the request context will be cancelled after we return.
+	// Use background context for checkpoint - we don't want HTTP connection closure
+	// to cancel the checkpoint mid-operation (especially for suspend checkpoints
+	// where stopping the container kills the worker's connection).
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	_, err = h.CheckpointJob(ctx, req.ID, suspendDuration)
+	job, err := h.CheckpointJob(ctx, req.ID, suspendDuration, req.Token)
 	if err != nil {
-		// Log the error but don't return it - response already sent
-		logger.Error().Err(err).Str("job_id", req.ID).Msg("checkpoint failed after response sent")
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 
-	return nil
+	return c.JSON(http.StatusOK, CheckpointJobResponse{Job: job})
 }
 
 type TakeJobLockRequest struct {

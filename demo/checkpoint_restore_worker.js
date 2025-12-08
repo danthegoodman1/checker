@@ -14,28 +14,35 @@ console.log(
   `Checkpoint restore test worker starting... Job ID: ${jobId}, Definition: ${defName}@${defVersion}`
 )
 
-async function checkpoint(suspendDuration) {
-  const body = suspendDuration ? { suspend_duration: suspendDuration } : {}
-  const resp = await fetch(`http://${apiUrl}/jobs/${jobId}/checkpoint`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  })
-  if (!resp.ok) {
-    throw new Error(`Checkpoint failed: ${resp.status} ${await resp.text()}`)
-  }
-  const result = await resp.json()
-
-  // If the server specifies a grace period, wait for it before returning.
-  // This ensures the worker is idle (not making progress) when the container is stopped.
-  if (result.grace_period_ms && result.grace_period_ms > 0) {
-    console.log(
-      `Waiting ${result.grace_period_ms}ms grace period before checkpoint completes...`
-    )
-    await new Promise((resolve) => setTimeout(resolve, result.grace_period_ms))
+async function checkpoint(suspendDuration, maxRetries = 5) {
+  const token = crypto.randomUUID()
+  const body = { token }
+  if (suspendDuration) {
+    body.suspend_duration = suspendDuration
   }
 
-  return result
+  // Retry loop - on restore, the connection will break and we retry with the same token
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const resp = await fetch(`http://${apiUrl}/jobs/${jobId}/checkpoint`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      })
+      if (!resp.ok) {
+        throw new Error(`Checkpoint failed: ${resp.status} ${await resp.text()}`)
+      }
+      return await resp.json()
+    } catch (err) {
+      // Connection errors are expected on restore - retry with same token
+      if (attempt < maxRetries - 1) {
+        console.log(`Checkpoint request failed (attempt ${attempt + 1}/${maxRetries}), retrying: ${err.message}`)
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        continue
+      }
+      throw err
+    }
+  }
 }
 
 async function exit(exitCode, output) {

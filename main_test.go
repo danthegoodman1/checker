@@ -428,3 +428,52 @@ func TestDockerCheckpointRestore(t *testing.T) {
 	assert.Equal(t, float64(1), job["CheckpointCount"])
 	t.Logf("Docker job checkpoint count: %v", job["CheckpointCount"])
 }
+
+// TestDockerCheckpointIdempotency tests that duplicate checkpoint tokens are handled
+// idempotently - the checkpoint count should only increment for unique tokens.
+func TestDockerCheckpointIdempotency(t *testing.T) {
+	env := setupDockerTest(t)
+
+	// Build the checkpoint idempotency test image
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	demoDir := filepath.Join(cwd, "demo")
+
+	cmd := exec.Command("docker", "build", "-t", "checker-checkpoint-idempotency-test:latest", "-f", filepath.Join(demoDir, "Dockerfile.checkpoint_idempotency"), demoDir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to build checkpoint idempotency test image: %v\n%s", err, output)
+	}
+
+	// Register the checkpoint idempotency test worker
+	env.registerWorkerWithConfig("test-checkpoint-idempotency", "1.0.0", runtime.RuntimeTypeDocker, map[string]any{
+		"image": "checker-checkpoint-idempotency-test:latest",
+	}, nil)
+
+	jobID := env.spawnJobWithLogs("test-checkpoint-idempotency", map[string]any{})
+	t.Logf("Spawned Docker checkpoint idempotency test job: %s", jobID)
+
+	result := env.waitForResult(jobID)
+	assert.Equal(t, 0, result.ExitCode)
+	t.Logf("Docker job completed with exit code: %d, output: %s", result.ExitCode, string(result.Output))
+
+	var idempotencyOutput struct {
+		Success          bool  `json:"success"`
+		CheckpointCounts []int `json:"checkpoint_counts"`
+		Expected         []int `json:"expected"`
+	}
+	require.NoError(t, json.Unmarshal(result.Output, &idempotencyOutput))
+
+	t.Logf("Checkpoint idempotency test results: success=%v, counts=%v, expected=%v",
+		idempotencyOutput.Success,
+		idempotencyOutput.CheckpointCounts,
+		idempotencyOutput.Expected)
+
+	assert.True(t, idempotencyOutput.Success, "idempotency test should pass")
+	assert.Equal(t, []int{1, 1, 2, 2}, idempotencyOutput.CheckpointCounts,
+		"checkpoint counts should be [1, 1, 2, 2] - duplicates should not increment")
+
+	job := env.getJob(jobID)
+	assert.Equal(t, float64(2), job["CheckpointCount"])
+	t.Logf("Docker job checkpoint count: %v", job["CheckpointCount"])
+}

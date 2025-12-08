@@ -11,16 +11,31 @@ console.log(
   `Checkpoint lock test worker starting... Job ID: ${jobId}, Definition: ${defName}@${defVersion}`
 )
 
-async function checkpoint() {
-  const resp = await fetch(`http://${apiUrl}/jobs/${jobId}/checkpoint`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}),
-  })
-  if (!resp.ok) {
-    throw new Error(`Checkpoint failed: ${resp.status} ${await resp.text()}`)
+async function checkpoint(maxRetries = 5) {
+  const token = crypto.randomUUID()
+
+  // Retry loop - on restore, the connection will break and we retry with the same token
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const resp = await fetch(`http://${apiUrl}/jobs/${jobId}/checkpoint`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token }),
+      })
+      if (!resp.ok) {
+        throw new Error(`Checkpoint failed: ${resp.status} ${await resp.text()}`)
+      }
+      return await resp.json()
+    } catch (err) {
+      // Connection errors are expected on restore - retry with same token
+      if (attempt < maxRetries - 1) {
+        console.log(`Checkpoint request failed (attempt ${attempt + 1}/${maxRetries}), retrying: ${err.message}`)
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        continue
+      }
+      throw err
+    }
   }
-  return resp.json()
 }
 
 async function exit(exitCode, output) {

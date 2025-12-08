@@ -46,6 +46,15 @@ type JobRunner struct {
 	activeLocksMu sync.Mutex
 	lockCounter   int64
 
+	// Checkpoint tokens for idempotency (maps token -> true)
+	// Stores tokens from both completed and collapsed checkpoint requests
+	checkpointTokens   map[string]struct{}
+	checkpointTokensMu sync.Mutex
+
+	// Track if a checkpoint is currently in progress (for collapsing concurrent requests)
+	checkpointInProgress   bool
+	checkpointInProgressMu sync.Mutex
+
 	// Context for cancellation
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -58,18 +67,19 @@ func NewJobRunner(job *Job, definition *JobDefinition, rt runtime.Runtime, confi
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &JobRunner{
-		job:            job,
-		definition:     definition,
-		rt:             rt,
-		config:         config,
-		apiHostAddress: apiHostAddress,
-		stdout:         stdout,
-		stderr:         stderr,
-		logger:         logger.With().Str("job_id", job.ID).Logger(),
-		doneChan:       make(chan struct{}),
-		activeLocks:    make(map[string]time.Time),
-		ctx:            ctx,
-		cancel:         cancel,
+		job:              job,
+		definition:       definition,
+		rt:               rt,
+		config:           config,
+		apiHostAddress:   apiHostAddress,
+		stdout:           stdout,
+		stderr:           stderr,
+		logger:           logger.With().Str("job_id", job.ID).Logger(),
+		doneChan:         make(chan struct{}),
+		activeLocks:      make(map[string]time.Time),
+		checkpointTokens: make(map[string]struct{}),
+		ctx:              ctx,
+		cancel:           cancel,
 	}
 }
 
@@ -249,13 +259,27 @@ func (r *JobRunner) GetState(ctx context.Context) (*Job, error) {
 	return r.job.Clone(), nil
 }
 
-// GetCheckpointGracePeriod returns the grace period from the runtime.
-func (r *JobRunner) GetCheckpointGracePeriod() int64 {
-	return r.rt.CheckpointGracePeriodMs()
-}
-
 // Checkpoint requests a checkpoint of the job.
-func (r *JobRunner) Checkpoint(ctx context.Context, suspendDuration time.Duration) (*Job, error) {
+// The token parameter is an idempotency key - if it matches a previously seen
+// checkpoint token, the request is a no-op (used for retry after restore).
+func (r *JobRunner) Checkpoint(ctx context.Context, suspendDuration time.Duration, token string) (*Job, error) {
+	// Token is required for idempotency
+	if token == "" {
+		return nil, fmt.Errorf("checkpoint token is required")
+	}
+
+	// Check for idempotent replay (retry after restore)
+	r.checkpointTokensMu.Lock()
+	if _, exists := r.checkpointTokens[token]; exists {
+		r.checkpointTokensMu.Unlock()
+		r.logger.Debug().Str("token", token).Msg("checkpoint token already used, returning success (idempotent replay)")
+		r.jobMu.RLock()
+		job := r.job.Clone()
+		r.jobMu.RUnlock()
+		return job, nil
+	}
+	r.checkpointTokensMu.Unlock()
+
 	// Check if already terminal
 	r.jobMu.RLock()
 	isTerminal := r.job.IsTerminal()
@@ -264,17 +288,31 @@ func (r *JobRunner) Checkpoint(ctx context.Context, suspendDuration time.Duratio
 		return nil, fmt.Errorf("job has terminated")
 	}
 
-	// Try to acquire write lock - if we can't, a checkpoint is already in progress.
-	// In that case, we collapse/ignore this request since the caller already received
-	// the grace period response and will wait appropriately.
-	if !r.checkpointMu.TryLock() {
-		r.logger.Debug().Msg("checkpoint already in progress, collapsing request")
+	// Check if a checkpoint is already in progress - if so, collapse this request
+	// but still store the token so retries work.
+	r.checkpointInProgressMu.Lock()
+	if r.checkpointInProgress {
+		r.checkpointTokensMu.Lock()
+		r.checkpointTokens[token] = struct{}{}
+		r.checkpointTokensMu.Unlock()
+		r.checkpointInProgressMu.Unlock()
+		r.logger.Debug().Str("token", token).Msg("checkpoint already in progress, collapsing request")
 		r.jobMu.RLock()
 		job := r.job.Clone()
 		r.jobMu.RUnlock()
 		return job, nil
 	}
+	r.checkpointInProgress = true
+	r.checkpointInProgressMu.Unlock()
+
+	// Acquire write lock - this waits for all read locks (from TakeLock) to be released
+	r.checkpointMu.Lock()
 	defer r.checkpointMu.Unlock()
+	defer func() {
+		r.checkpointInProgressMu.Lock()
+		r.checkpointInProgress = false
+		r.checkpointInProgressMu.Unlock()
+	}()
 
 	keepRunning := suspendDuration == 0
 
@@ -306,6 +344,11 @@ func (r *JobRunner) Checkpoint(ctx context.Context, suspendDuration time.Duratio
 		return nil, fmt.Errorf("checkpoint failed: %w", err)
 	}
 	r.checkpoint = checkpoint
+
+	// Store the token for idempotency on retry
+	r.checkpointTokensMu.Lock()
+	r.checkpointTokens[token] = struct{}{}
+	r.checkpointTokensMu.Unlock()
 
 	// Schedule the wake timer now that the checkpoint is stored
 	r.jobMu.Lock()
