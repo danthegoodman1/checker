@@ -46,11 +46,6 @@ type Config struct {
 	// If empty, uses the image's default user.
 	User string `json:"user"`
 
-	// CheckpointDir is the directory where checkpoint data will be stored.
-	// If empty, a default location based on execution ID will be used.
-	// Note: Docker checkpoint requires experimental features enabled.
-	CheckpointDir string `json:"checkpoint_dir"`
-
 	// Labels are additional labels to add to the container.
 	Labels map[string]string `json:"labels"`
 

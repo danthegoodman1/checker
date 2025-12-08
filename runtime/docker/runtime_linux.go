@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -32,11 +30,11 @@ type Runtime struct {
 }
 
 // dockerCheckpoint holds the data needed to restore a container on Linux.
+// Checkpoints are stored in Docker's default location, not a custom directory.
 type dockerCheckpoint struct {
 	executionID    string
 	containerID    string
 	checkpointName string
-	checkpointDir  string
 	env            map[string]string
 	config         *Config
 	apiHostAddress string
@@ -57,7 +55,6 @@ type processHandle struct {
 	containerID    string
 	env            map[string]string
 	config         *Config
-	checkpointDir  string
 	client         *client.Client
 	apiHostAddress string
 	logger         zerolog.Logger
@@ -75,16 +72,12 @@ func (h *processHandle) Checkpoint(ctx context.Context, keepRunning bool) (runti
 		Bool("keep_running", keepRunning).
 		Msg("creating checkpoint")
 
-	// Ensure checkpoint directory exists
-	if err := os.MkdirAll(h.checkpointDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create checkpoint directory: %w", err)
-	}
-
 	// Create checkpoint using Docker SDK
+	// Checkpoints are stored in Docker's default location:
+	// /var/lib/docker/containers/<container-id>/checkpoints/
 	err := h.client.CheckpointCreate(ctx, h.containerID, checkpoint.CreateOptions{
-		CheckpointID:  checkpointName,
-		CheckpointDir: h.checkpointDir,
-		Exit:          !keepRunning, // Exit=true means stop container after checkpoint
+		CheckpointID: checkpointName,
+		Exit:         !keepRunning, // Exit=true means stop container after checkpoint
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to checkpoint container: %w", err)
@@ -98,7 +91,6 @@ func (h *processHandle) Checkpoint(ctx context.Context, keepRunning bool) (runti
 		executionID:    h.executionID,
 		containerID:    h.containerID,
 		checkpointName: checkpointName,
-		checkpointDir:  h.checkpointDir,
 		env:            h.env,
 		config:         h.config,
 		apiHostAddress: h.apiHostAddress,
@@ -209,17 +201,12 @@ func (r *Runtime) Start(ctx context.Context, opts runtime.StartOptions) (runtime
 		Str("image", cfg.Image).
 		Msg("starting container")
 
-	checkpointDir := cfg.CheckpointDir
-	if checkpointDir == "" {
-		checkpointDir = filepath.Join(os.TempDir(), "checker", "docker-checkpoints", opts.ExecutionID)
-	}
+	// Note: We don't use a custom checkpoint directory because Docker's restore
+	// doesn't support custom checkpointdir in many configurations.
+	// Checkpoints are stored in Docker's default location:
+	// /var/lib/docker/containers/<container-id>/checkpoints/
 
-	// Ensure checkpoint directory exists
-	if err := os.MkdirAll(checkpointDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create checkpoint directory: %w", err)
-	}
-
-	return r.startContainer(ctx, opts.ExecutionID, opts.Env, cfg, checkpointDir, opts.APIHostAddress, opts.Stdout, opts.Stderr)
+	return r.startContainer(ctx, opts.ExecutionID, opts.Env, cfg, opts.APIHostAddress, opts.Stdout, opts.Stderr)
 }
 
 func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (runtime.Process, error) {
@@ -235,9 +222,9 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 		Msg("restoring container from checkpoint")
 
 	// Restore container from checkpoint using Docker SDK
+	// Checkpoints are in Docker's default location, no custom dir needed
 	err := r.client.ContainerStart(ctx, c.containerID, container.StartOptions{
-		CheckpointID:  c.checkpointName,
-		CheckpointDir: c.checkpointDir,
+		CheckpointID: c.checkpointName,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to restore container from checkpoint: %w", err)
@@ -260,14 +247,13 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 		containerID:    c.containerID,
 		env:            c.env,
 		config:         c.config,
-		checkpointDir:  c.checkpointDir,
 		client:         r.client,
 		apiHostAddress: c.apiHostAddress,
 		logger:         logger,
 	}, nil
 }
 
-func (r *Runtime) startContainer(ctx context.Context, executionID string, env map[string]string, cfg *Config, checkpointDir string, apiHostAddress string, stdout, stderr io.Writer) (runtime.Process, error) {
+func (r *Runtime) startContainer(ctx context.Context, executionID string, env map[string]string, cfg *Config, apiHostAddress string, stdout, stderr io.Writer) (runtime.Process, error) {
 	containerName := fmt.Sprintf("checker-%s", executionID)
 
 	// Extract port from apiHostAddress (e.g., "127.0.0.1:18083" -> "18083")
@@ -393,7 +379,6 @@ func (r *Runtime) startContainer(ctx context.Context, executionID string, env ma
 		containerID:    resp.ID,
 		env:            env,
 		config:         cfg,
-		checkpointDir:  checkpointDir,
 		client:         r.client,
 		apiHostAddress: apiHostAddress,
 		logger:         logger,
