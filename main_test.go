@@ -400,7 +400,7 @@ func TestDockerCheckpointRestore(t *testing.T) {
 	// Worker will checkpoint with 4s suspend only if within 3 seconds of spawn time.
 	// After the 4s suspend + restore, we'll be past the 3s window so checkpoint is skipped.
 	jobID := env.spawnJobWithLogs("test-checkpoint-restore", map[string]any{
-		"number":                inputNumber,
+		"number":                 inputNumber,
 		"checkpoint_within_secs": 3, // Only checkpoint within 3s of spawn
 		"suspend_duration":       "4s",
 	})
