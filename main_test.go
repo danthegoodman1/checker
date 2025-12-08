@@ -296,6 +296,7 @@ func setupPodmanTest(t *testing.T) *testEnv {
 // TestPodmanCheckpointRestore tests checkpoint with suspend_duration using Podman.
 // Podman exports checkpoints to portable tar files, enabling cross-node restore.
 // This test verifies that CRIU properly preserves in-memory state.
+// Also tests the checkpoint_dir config parameter.
 func TestPodmanCheckpointRestore(t *testing.T) {
 	env := setupPodmanTest(t)
 
@@ -310,11 +311,18 @@ func TestPodmanCheckpointRestore(t *testing.T) {
 		t.Fatalf("Failed to build checkpoint restore test image: %v\n%s", err, output)
 	}
 
+	// Create a custom checkpoint directory to test the checkpoint_dir config
+	checkpointDir := filepath.Join(os.TempDir(), "checker-test-checkpoints", fmt.Sprintf("test-%d", time.Now().UnixNano()))
+	t.Cleanup(func() {
+		os.RemoveAll(checkpointDir)
+	})
+
 	// Register the checkpoint restore test worker
 	// Use host network to avoid network namespace issues with checkpoint/restore
 	env.registerWorkerWithConfig("test-podman-checkpoint-restore", "1.0.0", runtime.RuntimeTypePodman, map[string]any{
-		"image":   "checker-checkpoint-restore-test:latest",
-		"network": "host",
+		"image":          "checker-checkpoint-restore-test:latest",
+		"network":        "host",
+		"checkpoint_dir": checkpointDir,
 	}, nil)
 
 	inputNumber := 10
@@ -354,6 +362,22 @@ func TestPodmanCheckpointRestore(t *testing.T) {
 	job := env.getJob(jobID)
 	assert.Equal(t, float64(1), job["CheckpointCount"])
 	t.Logf("Podman job checkpoint count: %v", job["CheckpointCount"])
+
+	// Verify checkpoint was created in the custom directory
+	entries, err := os.ReadDir(checkpointDir)
+	require.NoError(t, err, "checkpoint directory should exist")
+	assert.NotEmpty(t, entries, "checkpoint directory should contain files")
+	t.Logf("Checkpoint directory contents: %v", entries)
+
+	// Find the checkpoint tar file
+	var foundCheckpoint bool
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) == ".gz" {
+			foundCheckpoint = true
+			t.Logf("Found checkpoint file: %s", entry.Name())
+		}
+	}
+	assert.True(t, foundCheckpoint, "should find a .tar.gz checkpoint file in custom directory")
 }
 
 // TestPodmanCheckpointLock tests that the checkpoint lock prevents checkpointing
