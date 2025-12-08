@@ -10,7 +10,6 @@ type RuntimeType string
 
 const (
 	RuntimeTypeNodeJS RuntimeType = "nodejs"
-	RuntimeTypeDocker RuntimeType = "docker"
 	RuntimeTypePodman RuntimeType = "podman"
 	// Future runtime types:
 	// RuntimeTypeFirecracker RuntimeType = "firecracker"

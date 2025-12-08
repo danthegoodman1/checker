@@ -17,7 +17,6 @@ import (
 
 	"github.com/danthegoodman1/checker/hypervisor"
 	"github.com/danthegoodman1/checker/runtime"
-	"github.com/danthegoodman1/checker/runtime/docker"
 	"github.com/danthegoodman1/checker/runtime/nodejs"
 	"github.com/danthegoodman1/checker/runtime/podman"
 	"github.com/stretchr/testify/assert"
@@ -75,73 +74,10 @@ func setupTest(t *testing.T) *testEnv {
 	return env
 }
 
-func setupDockerTest(t *testing.T) *testEnv {
-	// On Linux, Docker containers access the host via host-gateway (docker bridge IP),
-	// so the runtime API must bind to 0.0.0.0 to be reachable from containers.
-	// On macOS, Docker Desktop handles host.docker.internal specially, so 127.0.0.1 works.
-	port := portCounter.Add(2)
-	callerAddr := fmt.Sprintf("127.0.0.1:%d", port)
-	var runtimeAddr string
-	if goruntime.GOOS == "linux" {
-		runtimeAddr = fmt.Sprintf("0.0.0.0:%d", port+1)
-	} else {
-		runtimeAddr = fmt.Sprintf("127.0.0.1:%d", port+1)
-	}
-
-	h := hypervisor.New(hypervisor.Config{
-		CallerHTTPAddress:  callerAddr,
-		RuntimeHTTPAddress: runtimeAddr,
-	})
-
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		assert.NoError(t, h.Shutdown(ctx))
-	})
-
-	time.Sleep(100 * time.Millisecond)
-
-	cwd, err := os.Getwd()
-	require.NoError(t, err)
-
-	env := &testEnv{
-		t:          t,
-		h:          h,
-		baseURL:    fmt.Sprintf("http://%s", callerAddr),
-		client:     &http.Client{Timeout: 60 * time.Second},
-		workerPath: filepath.Join(cwd, "demo", "worker.js"),
-	}
-
-	// Build the Docker image from the demo directory
-	demoDir := filepath.Join(cwd, "demo")
-
-	cmd := exec.Command("docker", "build", "-t", "checker-worker-test:latest", demoDir)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Skipf("Skipping Docker test: failed to build image: %v\n%s", err, output)
-	}
-
-	dockerRuntime, err := docker.NewRuntime()
-	if err != nil {
-		t.Skipf("Skipping Docker test: %v", err)
-	}
-	t.Cleanup(func() {
-		dockerRuntime.Close()
-	})
-	require.NoError(t, env.h.RegisterRuntime(dockerRuntime))
-	return env
-}
-
 func (e *testEnv) registerWorker(retryPolicy *hypervisor.RetryPolicy) {
 	e.registerWorkerWithConfig("test-worker", "1.0.0", runtime.RuntimeTypeNodeJS, map[string]any{
 		"entry_point": e.workerPath,
 		"work_dir":    filepath.Dir(e.workerPath),
-	}, retryPolicy)
-}
-
-func (e *testEnv) registerDockerWorker(retryPolicy *hypervisor.RetryPolicy) {
-	e.registerWorkerWithConfig("test-docker-worker", "1.0.0", runtime.RuntimeTypeDocker, map[string]any{
-		"image": "checker-worker-test:latest",
 	}, retryPolicy)
 }
 
@@ -311,224 +247,6 @@ func TestWorkerCrashExhaustsRetries(t *testing.T) {
 	assert.Equal(t, "failed", job["State"], "expected failed state")
 }
 
-// TestDockerWorker tests running a worker inside a Docker container.
-// Requires: docker build -t checker-worker-test:latest ./demo
-func TestDockerWorker(t *testing.T) {
-	env := setupDockerTest(t)
-	env.registerDockerWorker(nil)
-
-	inputNumber := 7
-	// Worker adds 1 then doubles: (7 + 1) * 2 = 16
-	expectedResult := (inputNumber + 1) * 2
-
-	jobID := env.spawnJobWithLogs("test-docker-worker", map[string]any{"number": inputNumber})
-	t.Logf("Spawned Docker job: %s", jobID)
-
-	result := env.waitForResult(jobID)
-	assert.Equal(t, 0, result.ExitCode)
-	t.Logf("Docker job completed with exit code: %d, output: %s", result.ExitCode, string(result.Output))
-
-	var output struct {
-		Result struct {
-			Step  int `json:"step"`
-			Value int `json:"value"`
-		} `json:"result"`
-	}
-	require.NoError(t, json.Unmarshal(result.Output, &output))
-	assert.Equal(t, expectedResult, output.Result.Value, "expected (input + 1) * 2")
-	t.Logf("Input: %d, Output: %d", inputNumber, output.Result.Value)
-
-	job := env.getJob(jobID)
-	assert.Equal(t, float64(1), job["CheckpointCount"])
-	t.Logf("Docker job checkpoint count: %v", job["CheckpointCount"])
-}
-
-// TestDockerCheckpointLock tests that the checkpoint lock prevents checkpointing
-// until the lock is released. The worker takes a lock, schedules a release after
-// a delay, and immediately tries to checkpoint. The checkpoint should be blocked
-// until the lock is released.
-func TestDockerCheckpointLock(t *testing.T) {
-	env := setupDockerTest(t)
-
-	// Build the checkpoint lock test image
-	cwd, err := os.Getwd()
-	require.NoError(t, err)
-	demoDir := filepath.Join(cwd, "demo")
-
-	cmd := exec.Command("docker", "build", "-t", "checker-checkpoint-lock-test:latest", "-f", filepath.Join(demoDir, "Dockerfile.checkpoint_lock"), demoDir)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("Failed to build checkpoint lock test image: %v\n%s", err, output)
-	}
-
-	// Register the checkpoint lock test worker
-	env.registerWorkerWithConfig("test-checkpoint-lock", "1.0.0", runtime.RuntimeTypeDocker, map[string]any{
-		"image": "checker-checkpoint-lock-test:latest",
-	}, nil)
-
-	lockHoldMs := 2000 // Hold lock for 2 seconds
-
-	jobID := env.spawnJobWithLogs("test-checkpoint-lock", map[string]any{
-		"lock_hold_ms": lockHoldMs,
-	})
-	t.Logf("Spawned Docker checkpoint lock test job: %s", jobID)
-
-	result := env.waitForResult(jobID)
-	assert.Equal(t, 0, result.ExitCode)
-	t.Logf("Docker job completed with exit code: %d, output: %s", result.ExitCode, string(result.Output))
-
-	var lockTestOutput struct {
-		LockHoldMs           int  `json:"lock_hold_ms"`
-		CheckpointDurationMs int  `json:"checkpoint_duration_ms"`
-		WasBlocked           bool `json:"was_blocked"`
-	}
-	require.NoError(t, json.Unmarshal(result.Output, &lockTestOutput))
-
-	t.Logf("Checkpoint lock test results: lock_hold_ms=%d, checkpoint_duration_ms=%d, was_blocked=%v",
-		lockTestOutput.LockHoldMs,
-		lockTestOutput.CheckpointDurationMs,
-		lockTestOutput.WasBlocked)
-
-	// Verify the checkpoint was actually blocked by the lock
-	assert.True(t, lockTestOutput.WasBlocked,
-		"checkpoint should have been blocked by lock (duration=%dms, expected >=%dms)",
-		lockTestOutput.CheckpointDurationMs,
-		lockHoldMs)
-
-	// Verify the checkpoint duration was at least the lock hold time
-	assert.GreaterOrEqual(t, lockTestOutput.CheckpointDurationMs, lockHoldMs,
-		"checkpoint duration should be >= %dms (lock hold time)", lockHoldMs)
-
-	job := env.getJob(jobID)
-	assert.Equal(t, float64(1), job["CheckpointCount"])
-	t.Logf("Docker job checkpoint count: %v", job["CheckpointCount"])
-}
-
-// TestDockerCheckpointRestore tests checkpoint with suspend_duration, then restore after delay.
-// On macOS, checkpoint just stops/starts the container. To avoid infinite loops,
-// we use the CHECKER_JOB_SPAWNED_AT env var (set by hypervisor) combined with
-// checkpoint_within_secs param. Worker only checkpoints if within that window.
-// After restore, enough time has passed so checkpoint is skipped.
-func TestDockerCheckpointRestore(t *testing.T) {
-	env := setupDockerTest(t)
-
-	// Build the checkpoint restore test image
-	cwd, err := os.Getwd()
-	require.NoError(t, err)
-	demoDir := filepath.Join(cwd, "demo")
-
-	cmd := exec.Command("docker", "build", "-t", "checker-checkpoint-restore-test:latest", "-f", filepath.Join(demoDir, "Dockerfile.checkpoint_restore"), demoDir)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("Failed to build checkpoint restore test image: %v\n%s", err, output)
-	}
-
-	// Register the checkpoint restore test worker
-	// Use host network to avoid network namespace issues with checkpoint/restore
-	env.registerWorkerWithConfig("test-checkpoint-restore", "1.0.0", runtime.RuntimeTypeDocker, map[string]any{
-		"image":   "checker-checkpoint-restore-test:latest",
-		"network": "host",
-	}, nil)
-
-	inputNumber := 10
-	expectedResult := (inputNumber + 1) * 2
-
-	// Worker will checkpoint with 4s suspend only if within 3 seconds of spawn time.
-	// After the 4s suspend + restore, we'll be past the 3s window so checkpoint is skipped.
-	jobID := env.spawnJobWithLogs("test-checkpoint-restore", map[string]any{
-		"number":                 inputNumber,
-		"checkpoint_within_secs": 3, // Only checkpoint within 3s of spawn
-		"suspend_duration":       "4s",
-	})
-	t.Logf("Spawned Docker checkpoint/restore job: %s", jobID)
-
-	result := env.waitForResult(jobID)
-	assert.Equal(t, 0, result.ExitCode)
-	t.Logf("Docker job completed with exit code: %d, output: %s", result.ExitCode, string(result.Output))
-
-	var restoreOutput struct {
-		Result struct {
-			Step  int `json:"step"`
-			Value int `json:"value"`
-		} `json:"result"`
-		CheckpointSkipped bool `json:"checkpoint_skipped"`
-		PreCheckpointRuns int  `json:"pre_checkpoint_runs"`
-	}
-	require.NoError(t, json.Unmarshal(result.Output, &restoreOutput))
-	assert.Equal(t, expectedResult, restoreOutput.Result.Value, "expected (input + 1) * 2")
-	t.Logf("Input: %d, Output: %d, CheckpointSkipped: %v, PreCheckpointRuns: %d",
-		inputNumber, restoreOutput.Result.Value, restoreOutput.CheckpointSkipped, restoreOutput.PreCheckpointRuns)
-
-	// Verify state preservation behavior differs between Linux (real CRIU) and macOS (workaround)
-	if goruntime.GOOS == "linux" {
-		// On Linux with real CRIU: in-memory state is preserved across checkpoint/restore,
-		// so code before checkpoint only executes once
-		assert.Equal(t, 1, restoreOutput.PreCheckpointRuns,
-			"with real CRIU checkpoint, pre-checkpoint code should only run once (state preserved)")
-	} else {
-		// On macOS: checkpoint just stops/starts the container without preserving state,
-		// so the process restarts from scratch and pre-checkpoint code runs twice
-		assert.Equal(t, 2, restoreOutput.PreCheckpointRuns,
-			"with macOS workaround, pre-checkpoint code runs twice (container restarts)")
-	}
-
-	job := env.getJob(jobID)
-	// On macOS: first run checkpoints (stops container), suspend timer restores it,
-	// second run skips checkpoint -> 1 checkpoint total
-	// On Linux with real CRIU: checkpoint preserves state, restore continues -> 1 checkpoint
-	assert.Equal(t, float64(1), job["CheckpointCount"])
-	t.Logf("Docker job checkpoint count: %v", job["CheckpointCount"])
-}
-
-// TestDockerCheckpointIdempotency tests that duplicate checkpoint tokens are handled
-// idempotently - the checkpoint count should only increment for unique tokens.
-func TestDockerCheckpointIdempotency(t *testing.T) {
-	env := setupDockerTest(t)
-
-	// Build the checkpoint idempotency test image
-	cwd, err := os.Getwd()
-	require.NoError(t, err)
-	demoDir := filepath.Join(cwd, "demo")
-
-	cmd := exec.Command("docker", "build", "-t", "checker-checkpoint-idempotency-test:latest", "-f", filepath.Join(demoDir, "Dockerfile.checkpoint_idempotency"), demoDir)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("Failed to build checkpoint idempotency test image: %v\n%s", err, output)
-	}
-
-	// Register the checkpoint idempotency test worker
-	env.registerWorkerWithConfig("test-checkpoint-idempotency", "1.0.0", runtime.RuntimeTypeDocker, map[string]any{
-		"image": "checker-checkpoint-idempotency-test:latest",
-	}, nil)
-
-	jobID := env.spawnJobWithLogs("test-checkpoint-idempotency", map[string]any{})
-	t.Logf("Spawned Docker checkpoint idempotency test job: %s", jobID)
-
-	result := env.waitForResult(jobID)
-	assert.Equal(t, 0, result.ExitCode)
-	t.Logf("Docker job completed with exit code: %d, output: %s", result.ExitCode, string(result.Output))
-
-	var idempotencyOutput struct {
-		Success          bool  `json:"success"`
-		CheckpointCounts []int `json:"checkpoint_counts"`
-		Expected         []int `json:"expected"`
-	}
-	require.NoError(t, json.Unmarshal(result.Output, &idempotencyOutput))
-
-	t.Logf("Checkpoint idempotency test results: success=%v, counts=%v, expected=%v",
-		idempotencyOutput.Success,
-		idempotencyOutput.CheckpointCounts,
-		idempotencyOutput.Expected)
-
-	assert.True(t, idempotencyOutput.Success, "idempotency test should pass")
-	assert.Equal(t, []int{1, 1, 2, 2}, idempotencyOutput.CheckpointCounts,
-		"checkpoint counts should be [1, 1, 2, 2] - duplicates should not increment")
-
-	job := env.getJob(jobID)
-	assert.Equal(t, float64(2), job["CheckpointCount"])
-	t.Logf("Docker job checkpoint count: %v", job["CheckpointCount"])
-}
-
 func setupPodmanTest(t *testing.T) *testEnv {
 	if goruntime.GOOS != "linux" {
 		t.Skip("Podman checkpoint/restore only supported on Linux")
@@ -635,5 +353,117 @@ func TestPodmanCheckpointRestore(t *testing.T) {
 
 	job := env.getJob(jobID)
 	assert.Equal(t, float64(1), job["CheckpointCount"])
+	t.Logf("Podman job checkpoint count: %v", job["CheckpointCount"])
+}
+
+// TestPodmanCheckpointLock tests that the checkpoint lock prevents checkpointing
+// until the lock is released. The worker takes a lock, schedules a release after
+// a delay, and immediately tries to checkpoint. The checkpoint should be blocked
+// until the lock is released.
+func TestPodmanCheckpointLock(t *testing.T) {
+	env := setupPodmanTest(t)
+
+	// Build the checkpoint lock test image
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	demoDir := filepath.Join(cwd, "demo")
+
+	cmd := exec.Command("podman", "build", "-t", "checker-checkpoint-lock-test:latest", "-f", filepath.Join(demoDir, "Dockerfile.checkpoint_lock"), demoDir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to build checkpoint lock test image: %v\n%s", err, output)
+	}
+
+	// Register the checkpoint lock test worker with host networking
+	env.registerWorkerWithConfig("test-podman-checkpoint-lock", "1.0.0", runtime.RuntimeTypePodman, map[string]any{
+		"image":   "checker-checkpoint-lock-test:latest",
+		"network": "host",
+	}, nil)
+
+	lockHoldMs := 2000 // Hold lock for 2 seconds
+
+	jobID := env.spawnJobWithLogs("test-podman-checkpoint-lock", map[string]any{
+		"lock_hold_ms": lockHoldMs,
+	})
+	t.Logf("Spawned Podman checkpoint lock test job: %s", jobID)
+
+	result := env.waitForResult(jobID)
+	assert.Equal(t, 0, result.ExitCode)
+	t.Logf("Podman job completed with exit code: %d, output: %s", result.ExitCode, string(result.Output))
+
+	var lockTestOutput struct {
+		LockHoldMs           int  `json:"lock_hold_ms"`
+		CheckpointDurationMs int  `json:"checkpoint_duration_ms"`
+		WasBlocked           bool `json:"was_blocked"`
+	}
+	require.NoError(t, json.Unmarshal(result.Output, &lockTestOutput))
+
+	t.Logf("Checkpoint lock test results: lock_hold_ms=%d, checkpoint_duration_ms=%d, was_blocked=%v",
+		lockTestOutput.LockHoldMs,
+		lockTestOutput.CheckpointDurationMs,
+		lockTestOutput.WasBlocked)
+
+	// Verify the checkpoint was actually blocked by the lock
+	assert.True(t, lockTestOutput.WasBlocked,
+		"checkpoint should have been blocked by lock (duration=%dms, expected >=%dms)",
+		lockTestOutput.CheckpointDurationMs,
+		lockHoldMs)
+
+	// Verify the checkpoint duration was at least the lock hold time
+	assert.GreaterOrEqual(t, lockTestOutput.CheckpointDurationMs, lockHoldMs,
+		"checkpoint duration should be >= %dms (lock hold time)", lockHoldMs)
+
+	job := env.getJob(jobID)
+	assert.Equal(t, float64(1), job["CheckpointCount"])
+	t.Logf("Podman job checkpoint count: %v", job["CheckpointCount"])
+}
+
+// TestPodmanCheckpointIdempotency tests that duplicate checkpoint tokens are handled
+// idempotently - the checkpoint count should only increment for unique tokens.
+func TestPodmanCheckpointIdempotency(t *testing.T) {
+	env := setupPodmanTest(t)
+
+	// Build the checkpoint idempotency test image
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	demoDir := filepath.Join(cwd, "demo")
+
+	cmd := exec.Command("podman", "build", "-t", "checker-checkpoint-idempotency-test:latest", "-f", filepath.Join(demoDir, "Dockerfile.checkpoint_idempotency"), demoDir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to build checkpoint idempotency test image: %v\n%s", err, output)
+	}
+
+	// Register the checkpoint idempotency test worker with host networking
+	env.registerWorkerWithConfig("test-podman-checkpoint-idempotency", "1.0.0", runtime.RuntimeTypePodman, map[string]any{
+		"image":   "checker-checkpoint-idempotency-test:latest",
+		"network": "host",
+	}, nil)
+
+	jobID := env.spawnJobWithLogs("test-podman-checkpoint-idempotency", map[string]any{})
+	t.Logf("Spawned Podman checkpoint idempotency test job: %s", jobID)
+
+	result := env.waitForResult(jobID)
+	assert.Equal(t, 0, result.ExitCode)
+	t.Logf("Podman job completed with exit code: %d, output: %s", result.ExitCode, string(result.Output))
+
+	var idempotencyOutput struct {
+		Success          bool  `json:"success"`
+		CheckpointCounts []int `json:"checkpoint_counts"`
+		Expected         []int `json:"expected"`
+	}
+	require.NoError(t, json.Unmarshal(result.Output, &idempotencyOutput))
+
+	t.Logf("Checkpoint idempotency test results: success=%v, counts=%v, expected=%v",
+		idempotencyOutput.Success,
+		idempotencyOutput.CheckpointCounts,
+		idempotencyOutput.Expected)
+
+	assert.True(t, idempotencyOutput.Success, "idempotency test should pass")
+	assert.Equal(t, []int{1, 1, 2, 2}, idempotencyOutput.CheckpointCounts,
+		"checkpoint counts should be [1, 1, 2, 2] - duplicates should not increment")
+
+	job := env.getJob(jobID)
+	assert.Equal(t, float64(2), job["CheckpointCount"])
 	t.Logf("Podman job checkpoint count: %v", job["CheckpointCount"])
 }
