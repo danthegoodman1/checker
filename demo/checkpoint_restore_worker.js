@@ -38,7 +38,7 @@ async function checkpoint(suspendDuration, maxRetries = 5) {
       // connection is dead and we want to fail fast and retry
       const controller = new AbortController()
       const timeoutId = setTimeout(() => controller.abort(), 500)
-      
+
       const resp = await fetch(`http://${apiUrl}/jobs/${jobId}/checkpoint`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -47,13 +47,19 @@ async function checkpoint(suspendDuration, maxRetries = 5) {
       })
       clearTimeout(timeoutId)
       if (!resp.ok) {
-        throw new Error(`Checkpoint failed: ${resp.status} ${await resp.text()}`)
+        throw new Error(
+          `Checkpoint failed: ${resp.status} ${await resp.text()}`
+        )
       }
       return await resp.json()
     } catch (err) {
       // Connection errors are expected on restore - retry with same token
       if (attempt < maxRetries - 1) {
-        console.log(`Checkpoint request failed (attempt ${attempt + 1}/${maxRetries}), retrying: ${err.message}`)
+        console.log(
+          `Checkpoint request failed (attempt ${
+            attempt + 1
+          }/${maxRetries}), retrying: ${err.message}`
+        )
         await new Promise((resolve) => setTimeout(resolve, 100))
         continue
       }
