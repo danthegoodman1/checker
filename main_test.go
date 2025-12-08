@@ -19,6 +19,7 @@ import (
 	"github.com/danthegoodman1/checker/runtime"
 	"github.com/danthegoodman1/checker/runtime/docker"
 	"github.com/danthegoodman1/checker/runtime/nodejs"
+	"github.com/danthegoodman1/checker/runtime/podman"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -526,4 +527,113 @@ func TestDockerCheckpointIdempotency(t *testing.T) {
 	job := env.getJob(jobID)
 	assert.Equal(t, float64(2), job["CheckpointCount"])
 	t.Logf("Docker job checkpoint count: %v", job["CheckpointCount"])
+}
+
+func setupPodmanTest(t *testing.T) *testEnv {
+	if goruntime.GOOS != "linux" {
+		t.Skip("Podman checkpoint/restore only supported on Linux")
+	}
+
+	// On Linux, containers access the host via host networking,
+	// so the runtime API must bind to 0.0.0.0 to be reachable from containers.
+	port := portCounter.Add(2)
+	callerAddr := fmt.Sprintf("127.0.0.1:%d", port)
+	runtimeAddr := fmt.Sprintf("0.0.0.0:%d", port+1)
+
+	h := hypervisor.New(hypervisor.Config{
+		CallerHTTPAddress:  callerAddr,
+		RuntimeHTTPAddress: runtimeAddr,
+	})
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		assert.NoError(t, h.Shutdown(ctx))
+	})
+
+	time.Sleep(100 * time.Millisecond)
+
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+
+	env := &testEnv{
+		t:          t,
+		h:          h,
+		baseURL:    fmt.Sprintf("http://%s", callerAddr),
+		client:     &http.Client{Timeout: 60 * time.Second},
+		workerPath: filepath.Join(cwd, "demo", "worker.js"),
+	}
+
+	podmanRuntime, err := podman.NewRuntime()
+	if err != nil {
+		t.Skipf("Skipping Podman test: %v", err)
+	}
+	t.Cleanup(func() {
+		podmanRuntime.Close()
+	})
+	require.NoError(t, env.h.RegisterRuntime(podmanRuntime))
+	return env
+}
+
+// TestPodmanCheckpointRestore tests checkpoint with suspend_duration using Podman.
+// Podman exports checkpoints to portable tar files, enabling cross-node restore.
+// This test verifies that CRIU properly preserves in-memory state.
+func TestPodmanCheckpointRestore(t *testing.T) {
+	env := setupPodmanTest(t)
+
+	// Build the checkpoint restore test image using podman
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	demoDir := filepath.Join(cwd, "demo")
+
+	cmd := exec.Command("podman", "build", "-t", "checker-checkpoint-restore-test:latest", "-f", filepath.Join(demoDir, "Dockerfile.checkpoint_restore"), demoDir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to build checkpoint restore test image: %v\n%s", err, output)
+	}
+
+	// Register the checkpoint restore test worker
+	// Use host network to avoid network namespace issues with checkpoint/restore
+	env.registerWorkerWithConfig("test-podman-checkpoint-restore", "1.0.0", runtime.RuntimeTypePodman, map[string]any{
+		"image":   "checker-checkpoint-restore-test:latest",
+		"network": "host",
+	}, nil)
+
+	inputNumber := 10
+	expectedResult := (inputNumber + 1) * 2
+
+	// Worker will checkpoint with 4s suspend only if within 3 seconds of spawn time.
+	// After the 4s suspend + restore, we'll be past the 3s window so checkpoint is skipped.
+	jobID := env.spawnJobWithLogs("test-podman-checkpoint-restore", map[string]any{
+		"number":                 inputNumber,
+		"checkpoint_within_secs": 3, // Only checkpoint within 3s of spawn
+		"suspend_duration":       "4s",
+	})
+	t.Logf("Spawned Podman checkpoint/restore job: %s", jobID)
+
+	result := env.waitForResult(jobID)
+	assert.Equal(t, 0, result.ExitCode)
+	t.Logf("Podman job completed with exit code: %d, output: %s", result.ExitCode, string(result.Output))
+
+	var restoreOutput struct {
+		Result struct {
+			Step  int `json:"step"`
+			Value int `json:"value"`
+		} `json:"result"`
+		CheckpointSkipped bool `json:"checkpoint_skipped"`
+		PreCheckpointRuns int  `json:"pre_checkpoint_runs"`
+	}
+	require.NoError(t, json.Unmarshal(result.Output, &restoreOutput))
+	assert.Equal(t, expectedResult, restoreOutput.Result.Value, "expected (input + 1) * 2")
+	t.Logf("Input: %d, Output: %d, CheckpointSkipped: %v, PreCheckpointRuns: %d",
+		inputNumber, restoreOutput.Result.Value, restoreOutput.CheckpointSkipped, restoreOutput.PreCheckpointRuns)
+
+	// With real CRIU (Podman on Linux): in-memory state is preserved across checkpoint/restore,
+	// so code before checkpoint only executes once
+	assert.Equal(t, 1, restoreOutput.PreCheckpointRuns,
+		"with real CRIU checkpoint, pre-checkpoint code should only run once (state preserved)")
+
+	job := env.getJob(jobID)
+	assert.Equal(t, float64(1), job["CheckpointCount"])
+	t.Logf("Podman job checkpoint count: %v", job["CheckpointCount"])
 }
