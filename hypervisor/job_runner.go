@@ -243,6 +243,19 @@ func (r *JobRunner) MarkDone() {
 	})
 }
 
+// MarkFailed persists the failed state to DB and marks the job as done.
+// This should be called when retries are exhausted.
+func (r *JobRunner) MarkFailed() {
+	r.jobMu.RLock()
+	completedAt := r.job.CompletedAt
+	result := r.job.Result
+	errorMsg := r.job.Error
+	r.jobMu.RUnlock()
+
+	r.persistJobCompleted(query.JobStateFailed, completedAt, result, errorMsg)
+	r.MarkDone()
+}
+
 // waitForExit waits for the process to exit and updates state accordingly.
 func (r *JobRunner) waitForExit() {
 	exitCode, err := r.process.Wait(r.ctx)

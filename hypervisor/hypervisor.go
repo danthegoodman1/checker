@@ -353,9 +353,7 @@ func (h *Hypervisor) Spawn(ctx context.Context, opts SpawnOptions) (string, erro
 				Int("exit_code", exitCode).
 				Int("retry_count", job.RetryCount).
 				Msg("job failed, no retries remaining")
-			// Persist the failed state now that we know we're not retrying
-			r.persistJobCompleted(query.JobStateFailed, job.CompletedAt, job.Result, job.Error)
-			r.MarkDone()
+			r.MarkFailed()
 		}
 	})
 
@@ -932,9 +930,7 @@ func (h *Hypervisor) restartPendingJob(ctx context.Context, dbJob query.Job) err
 				Int("exit_code", exitCode).
 				Int("retry_count", job.RetryCount).
 				Msg("job failed, no retries remaining")
-			// Persist the failed state now that we know we're not retrying
-			r.persistJobCompleted(query.JobStateFailed, job.CompletedAt, job.Result, job.Error)
-			r.MarkDone()
+			r.MarkFailed()
 		}
 	})
 
@@ -1025,9 +1021,7 @@ func (h *Hypervisor) scheduleJobWake(ctx context.Context, dbJob query.Job) error
 				Int("exit_code", exitCode).
 				Int("retry_count", job.RetryCount).
 				Msg("job failed, no retries remaining")
-			// Persist the failed state now that we know we're not retrying
-			r.persistJobCompleted(query.JobStateFailed, job.CompletedAt, job.Result, job.Error)
-			r.MarkDone()
+			r.MarkFailed()
 		}
 	})
 
@@ -1277,9 +1271,7 @@ func (h *Hypervisor) wakeJob(ctx context.Context, dbJob query.Job) error {
 				Int("exit_code", exitCode).
 				Int("retry_count", job.RetryCount).
 				Msg("job failed, no retries remaining")
-			// Persist the failed state now that we know we're not retrying
-			r.persistJobCompleted(query.JobStateFailed, job.CompletedAt, job.Result, job.Error)
-			r.MarkDone()
+			r.MarkFailed()
 		}
 	})
 

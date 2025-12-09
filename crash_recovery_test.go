@@ -209,7 +209,15 @@ func TestCrashRecoveryHypervisor(t *testing.T) {
 	require.True(t, completed, "Job did not complete")
 	assert.Equal(t, query.JobStateCompleted, finalState, "Job should have completed successfully")
 
-	// Verify the result
+	// Verify the job is complete from the hypervisor's perspective
+	t.Log("Verifying job completion via hypervisor...")
+	hvJob, err := h2.GetJob(ctx, jobID)
+	require.NoError(t, err, "Should be able to get job from hypervisor")
+	assert.Equal(t, hypervisor.JobStateCompleted, hvJob.State, "Hypervisor should report job as completed")
+	require.NotNil(t, hvJob.Result, "Hypervisor job should have a result")
+	assert.Equal(t, 0, hvJob.Result.ExitCode, "Hypervisor should report exit code 0")
+
+	// Verify the result from database
 	var dbJob query.Job
 	err = query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 		var err error
@@ -359,7 +367,15 @@ func TestCrashRecoveryPendingJob(t *testing.T) {
 	require.True(t, completed, "Job did not complete")
 	assert.Equal(t, query.JobStateCompleted, finalState, "Job should have completed successfully")
 
-	// Verify result: (7 + 1) * 2 = 16
+	// Verify the job is complete from the hypervisor's perspective
+	t.Log("Verifying job completion via hypervisor...")
+	hvJob, err := h.GetJob(ctx, jobID)
+	require.NoError(t, err, "Should be able to get job from hypervisor")
+	assert.Equal(t, hypervisor.JobStateCompleted, hvJob.State, "Hypervisor should report job as completed")
+	require.NotNil(t, hvJob.Result, "Hypervisor job should have a result")
+	assert.Equal(t, 0, hvJob.Result.ExitCode, "Hypervisor should report exit code 0")
+
+	// Verify result from database: (7 + 1) * 2 = 16
 	var dbJob query.Job
 	err = query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 		var err error
@@ -562,7 +578,15 @@ func TestCrashRecoveryFullServerCrash(t *testing.T) {
 	require.True(t, completed, "Job did not complete")
 	assert.Equal(t, query.JobStateCompleted, finalState, "Job should have completed successfully")
 
-	// Verify the result: (3 + 1) * 2 = 8
+	// Verify the job is complete from the hypervisor's perspective
+	t.Log("Verifying job completion via hypervisor...")
+	hvJob, err := h2.GetJob(ctx, jobID)
+	require.NoError(t, err, "Should be able to get job from hypervisor")
+	assert.Equal(t, hypervisor.JobStateCompleted, hvJob.State, "Hypervisor should report job as completed")
+	require.NotNil(t, hvJob.Result, "Hypervisor job should have a result")
+	assert.Equal(t, 0, hvJob.Result.ExitCode, "Hypervisor should report exit code 0")
+
+	// Verify the result from database: (3 + 1) * 2 = 8
 	var dbJob query.Job
 	err = query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 		var err error
@@ -767,7 +791,15 @@ func TestCrashRecoveryProcessCrashRestoreFromCheckpoint(t *testing.T) {
 	require.True(t, completed, "Job did not complete")
 	assert.Equal(t, query.JobStateCompleted, finalState, "Job should have completed successfully after retry from checkpoint")
 
-	// Verify the result: (5 + 1) * 2 = 12
+	// Verify the job is complete from the hypervisor's perspective
+	t.Log("Verifying job completion via hypervisor...")
+	hvJob, err := h.GetJob(ctx, jobID)
+	require.NoError(t, err, "Should be able to get job from hypervisor")
+	assert.Equal(t, hypervisor.JobStateCompleted, hvJob.State, "Hypervisor should report job as completed")
+	require.NotNil(t, hvJob.Result, "Hypervisor job should have a result")
+	assert.Equal(t, 0, hvJob.Result.ExitCode, "Hypervisor should report exit code 0")
+
+	// Verify the result from database: (5 + 1) * 2 = 12
 	var dbJob query.Job
 	err = query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 		var err error
