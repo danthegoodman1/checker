@@ -60,6 +60,11 @@ type JobRunner struct {
 	checkpointInProgress   bool
 	checkpointInProgressMu sync.Mutex
 
+	// processReady is closed when the process field is set and ready to use.
+	// This is used during restore to signal that the runner can handle requests.
+	processReady     chan struct{}
+	processReadyOnce sync.Once
+
 	// Context for cancellation
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -87,9 +92,18 @@ func NewJobRunner(job *Job, definition *JobDefinition, rt runtime.Runtime, confi
 		doneChan:         make(chan struct{}),
 		activeLocks:      make(map[string]time.Time),
 		checkpointTokens: make(map[string]struct{}),
+		processReady:     make(chan struct{}),
 		ctx:              ctx,
 		cancel:           cancel,
 	}
+}
+
+// signalProcessReady signals that the process field is set and ready to use.
+// This is called after Start() or after restoring from checkpoint.
+func (r *JobRunner) signalProcessReady() {
+	r.processReadyOnce.Do(func() {
+		close(r.processReady)
+	})
 }
 
 func (r *JobRunner) Start() error {
@@ -112,6 +126,7 @@ func (r *JobRunner) Start() error {
 	}
 
 	r.process = process
+	r.signalProcessReady()
 
 	now := time.Now()
 
@@ -302,6 +317,14 @@ func (r *JobRunner) Checkpoint(ctx context.Context, suspendDuration time.Duratio
 	// Token is required for idempotency
 	if token == "" {
 		return nil, fmt.Errorf("checkpoint token is required")
+	}
+
+	// Wait for process to be ready (handles race during restore where runner
+	// is in map but process hasn't been set yet)
+	select {
+	case <-r.processReady:
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 
 	// Check for idempotent replay (retry after restore)
