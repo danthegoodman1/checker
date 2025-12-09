@@ -725,6 +725,7 @@ func TestProcessCrashRestoreFromCheckpoint(t *testing.T) {
 	// Phase 3: Wait for hypervisor to detect failure, retry from checkpoint, and complete
 	t.Log("=== Phase 3: Waiting for retry from checkpoint and completion ===")
 
+	const maxRetries = 3 // Must match the RetryPolicy.MaxRetries in the job definition
 	var completed bool
 	var finalState query.JobState
 	for i := 0; i < 120; i++ {
@@ -737,12 +738,21 @@ func TestProcessCrashRestoreFromCheckpoint(t *testing.T) {
 		require.NoError(t, err)
 
 		finalState = dbJob.State
-		if dbJob.State == query.JobStateCompleted || dbJob.State == query.JobStateFailed {
+		// Only consider "done" if completed, or failed with retries exhausted
+		if dbJob.State == query.JobStateCompleted {
 			completed = true
 			t.Logf("Job finished with state: %s (retry_count=%d)", dbJob.State, dbJob.RetryCount)
 			if dbJob.ResultOutput != nil {
 				t.Logf("Job output: %s", string(dbJob.ResultOutput))
 			}
+			if dbJob.Error.Valid {
+				t.Logf("Job error: %s", dbJob.Error.String)
+			}
+			break
+		}
+		if dbJob.State == query.JobStateFailed && dbJob.RetryCount >= maxRetries {
+			completed = true
+			t.Logf("Job failed after exhausting retries: state=%s, retry_count=%d", dbJob.State, dbJob.RetryCount)
 			if dbJob.Error.Valid {
 				t.Logf("Job error: %s", dbJob.Error.String)
 			}
