@@ -98,13 +98,12 @@ func TestCrashRecoveryHypervisor(t *testing.T) {
 	}
 	require.NoError(t, h1.RegisterJobDefinition(jd))
 
-	// Spawn job with short checkpoint window so after restore (which takes ~5-7s due to
-	// poller timing), the job will be past the cutoff and won't checkpoint again.
+	// Spawn job that will checkpoint and suspend
 	ctx := context.Background()
 	jobID, err := h1.Spawn(ctx, hypervisor.SpawnOptions{
 		DefinitionName:    "crash-recovery-test",
 		DefinitionVersion: "1.0.0",
-		Params:            json.RawMessage(`{"number": 5, "checkpoint_within_secs": 3, "suspend_duration": "30s"}`),
+		Params:            json.RawMessage(`{"number": 5, "suspend_duration": "5s"}`),
 		Stdout:            &testLogWriter{t: t, prefix: "[stdout]"},
 		Stderr:            &testLogWriter{t: t, prefix: "[stderr]"},
 	})
