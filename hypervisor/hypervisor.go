@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	goruntime "runtime"
 	"sync"
 	"time"
@@ -1184,6 +1185,23 @@ func (h *Hypervisor) wakeJob(ctx context.Context, dbJob query.Job) error {
 
 	if !dbJob.CheckpointPath.Valid || dbJob.CheckpointPath.String == "" {
 		return fmt.Errorf("no checkpoint path for suspended job")
+	}
+
+	// Verify checkpoint file exists before attempting restore
+	checkpointPath := dbJob.CheckpointPath.String
+	if fileInfo, statErr := os.Stat(checkpointPath); statErr != nil {
+		logger.Error().
+			Err(statErr).
+			Str("checkpoint_path", checkpointPath).
+			Str("job_id", dbJob.ID).
+			Msg("checkpoint file does not exist")
+		return fmt.Errorf("checkpoint file does not exist at %s: %w", checkpointPath, statErr)
+	} else {
+		logger.Info().
+			Str("checkpoint_path", checkpointPath).
+			Str("job_id", dbJob.ID).
+			Int64("file_size", fileInfo.Size()).
+			Msg("checkpoint file verified")
 	}
 
 	checkpoint, err := rt.ReconstructCheckpoint(
