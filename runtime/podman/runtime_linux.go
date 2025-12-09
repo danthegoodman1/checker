@@ -250,14 +250,26 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 	// This handles crash recovery where the old container (stopped after checkpoint) still exists,
 	// or normal wake where we want a clean slate.
 	containerName := fmt.Sprintf("checker-%s", c.executionID)
-	cleanupCmd := exec.CommandContext(ctx, "podman", "rm", "-f", "--ignore", containerName)
+
+	// First, try to cleanup any container state (storage, network, etc.)
+	cleanupStateCmd := exec.CommandContext(ctx, "podman", "container", "cleanup", containerName)
+	if cleanupOutput, cleanupErr := cleanupStateCmd.CombinedOutput(); cleanupErr != nil {
+		r.logger.Debug().
+			Err(cleanupErr).
+			Str("output", string(cleanupOutput)).
+			Str("container_name", containerName).
+			Msg("container cleanup failed (may not exist or already clean)")
+	}
+
+	// Then remove the container with --volumes to clean up any associated storage
+	cleanupCmd := exec.CommandContext(ctx, "podman", "rm", "-f", "--ignore", "--volumes", containerName)
 	if cleanupOutput, cleanupErr := cleanupCmd.CombinedOutput(); cleanupErr != nil {
 		// Log but don't fail - container might not exist
 		r.logger.Debug().
 			Err(cleanupErr).
 			Str("output", string(cleanupOutput)).
 			Str("container_name", containerName).
-			Msg("cleanup of existing container failed (may not exist)")
+			Msg("container rm failed (may not exist)")
 	}
 
 	// Also prune any stopped containers to clean up storage that might conflict with restore
