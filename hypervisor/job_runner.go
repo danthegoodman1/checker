@@ -293,7 +293,11 @@ func (r *JobRunner) waitForExit() {
 		r.persistJobCompleted(dbState, completedAt, result, errorMsg)
 	}
 
-	if cleanupErr := r.process.Cleanup(r.ctx); cleanupErr != nil {
+	// Use a background context with timeout for cleanup - it should complete
+	// even if the job's context was cancelled (e.g., during shutdown)
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cleanupCancel()
+	if cleanupErr := r.process.Cleanup(cleanupCtx); cleanupErr != nil {
 		r.logger.Error().Err(cleanupErr).Msg("failed to cleanup process")
 	}
 
