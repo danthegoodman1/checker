@@ -2,6 +2,7 @@ package hypervisor
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/danthegoodman1/checker/runtime"
 )
@@ -83,6 +84,8 @@ func (jd *JobDefinition) Clone() *JobDefinition {
 // JobDefinitionRegistry manages registered job definitions.
 // This is used internally by the Hypervisor.
 type JobDefinitionRegistry struct {
+	mu sync.RWMutex
+
 	// definitions maps job name -> version -> JobDefinition
 	definitions map[string]map[string]*JobDefinition
 
@@ -105,6 +108,9 @@ func (r *JobDefinitionRegistry) Register(jd *JobDefinition) error {
 		return fmt.Errorf("invalid job definition: %w", err)
 	}
 
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	if r.definitions[jd.Name] == nil {
 		r.definitions[jd.Name] = make(map[string]*JobDefinition)
 	}
@@ -123,6 +129,9 @@ func (r *JobDefinitionRegistry) Register(jd *JobDefinition) error {
 // Get retrieves a job definition by name and version.
 // Use VersionLatest to get the latest version.
 func (r *JobDefinitionRegistry) Get(name, version string) (*JobDefinition, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
 	versions, exists := r.definitions[name]
 	if !exists {
 		return nil, fmt.Errorf("job definition %q not found", name)
@@ -146,6 +155,9 @@ func (r *JobDefinitionRegistry) Get(name, version string) (*JobDefinition, error
 
 // List returns all registered job definitions.
 func (r *JobDefinitionRegistry) List() []*JobDefinition {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
 	var result []*JobDefinition
 	for _, versions := range r.definitions {
 		for _, jd := range versions {
@@ -157,6 +169,9 @@ func (r *JobDefinitionRegistry) List() []*JobDefinition {
 
 // ListVersions returns all versions of a job definition by name.
 func (r *JobDefinitionRegistry) ListVersions(name string) ([]*JobDefinition, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
 	versions, exists := r.definitions[name]
 	if !exists {
 		return nil, fmt.Errorf("job definition %q not found", name)
@@ -171,6 +186,9 @@ func (r *JobDefinitionRegistry) ListVersions(name string) ([]*JobDefinition, err
 
 // Unregister removes a job definition from the registry.
 func (r *JobDefinitionRegistry) Unregister(name, version string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	versions, exists := r.definitions[name]
 	if !exists {
 		return fmt.Errorf("job definition %q not found", name)
