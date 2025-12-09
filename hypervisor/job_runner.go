@@ -58,8 +58,12 @@ type JobRunner struct {
 	checkpointTokensMu sync.Mutex
 
 	// Track if a checkpoint is currently in progress (for collapsing concurrent requests)
-	checkpointInProgress   bool
-	checkpointInProgressMu sync.Mutex
+	// When a checkpoint is in progress, collapsed requests wait on checkpointDone
+	// and then check checkpointErr for the result.
+	checkpointInProgress bool
+	checkpointDone       chan struct{} // Closed when current checkpoint completes
+	checkpointErr        error         // Result of the current checkpoint (nil on success)
+	checkpointProgressMu sync.Mutex    // Protects checkpointInProgress, checkpointDone, checkpointErr
 
 	// processReady is closed when the process field is set and ready to use.
 	// This is used during restore to signal that the runner can handle requests.
@@ -452,31 +456,62 @@ func (r *JobRunner) Checkpoint(ctx context.Context, suspendDuration time.Duratio
 		return nil, fmt.Errorf("job has terminated")
 	}
 
-	// Check if a checkpoint is already in progress - if so, collapse this request
-	// but still store the token so retries work.
-	r.checkpointInProgressMu.Lock()
+	// Check if a checkpoint is already in progress - if so, wait for it to complete
+	// and share the result. This collapses concurrent checkpoint requests.
+	r.checkpointProgressMu.Lock()
 	if r.checkpointInProgress {
-		r.checkpointTokensMu.Lock()
-		r.checkpointTokens[token] = struct{}{}
-		r.checkpointTokensMu.Unlock()
-		r.checkpointInProgressMu.Unlock()
-		r.logger.Debug().Str("token", token).Msg("checkpoint already in progress, collapsing request")
-		r.jobMu.RLock()
-		job := r.job.Clone()
-		r.jobMu.RUnlock()
-		return job, nil
+		// Wait for the in-progress checkpoint to complete
+		doneCh := r.checkpointDone
+		r.checkpointProgressMu.Unlock()
+
+		r.logger.Debug().Str("token", token).Msg("checkpoint already in progress, waiting for result")
+
+		select {
+		case <-doneCh:
+			// Checkpoint completed, check result
+			r.checkpointProgressMu.Lock()
+			err := r.checkpointErr
+			r.checkpointProgressMu.Unlock()
+
+			if err != nil {
+				return nil, err
+			}
+
+			// Checkpoint succeeded - store this token for idempotency and return success
+			r.checkpointTokensMu.Lock()
+			r.checkpointTokens[token] = struct{}{}
+			r.checkpointTokensMu.Unlock()
+
+			r.jobMu.RLock()
+			job := r.job.Clone()
+			r.jobMu.RUnlock()
+			return job, nil
+
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-r.ctx.Done():
+			return nil, fmt.Errorf("job runner cancelled")
+		}
 	}
+
+	// Start a new checkpoint - create the done channel for waiters
 	r.checkpointInProgress = true
-	r.checkpointInProgressMu.Unlock()
+	r.checkpointDone = make(chan struct{})
+	r.checkpointErr = nil
+	r.checkpointProgressMu.Unlock()
+
+	// Helper to signal completion to waiting requests
+	signalCheckpointDone := func(err error) {
+		r.checkpointProgressMu.Lock()
+		r.checkpointErr = err
+		r.checkpointInProgress = false
+		close(r.checkpointDone)
+		r.checkpointProgressMu.Unlock()
+	}
 
 	// Acquire write lock - this waits for all read locks (from TakeLock) to be released
 	r.checkpointMu.Lock()
 	defer r.checkpointMu.Unlock()
-	defer func() {
-		r.checkpointInProgressMu.Lock()
-		r.checkpointInProgress = false
-		r.checkpointInProgressMu.Unlock()
-	}()
 
 	keepRunning := suspendDuration == 0
 
@@ -504,7 +539,10 @@ func (r *JobRunner) Checkpoint(ctx context.Context, suspendDuration time.Duratio
 		r.job.State = JobStateRunning
 		r.job.SuspendUntil = nil
 		r.jobMu.Unlock()
-		return nil, fmt.Errorf("checkpoint failed: %w", err)
+
+		checkpointErr := fmt.Errorf("checkpoint failed: %w", err)
+		signalCheckpointDone(checkpointErr)
+		return nil, checkpointErr
 	}
 	r.checkpoint = checkpoint
 
@@ -522,7 +560,15 @@ func (r *JobRunner) Checkpoint(ctx context.Context, suspendDuration time.Duratio
 	lastCheckpointAt := *r.job.LastCheckpointAt
 	suspendUntilCopy := r.job.SuspendUntil
 	r.jobMu.RUnlock()
-	r.persistJobCheckpointed(dbState, lastCheckpointAt, suspendUntilCopy, checkpoint.Path())
+
+	if dbErr := r.persistJobCheckpointedWithError(dbState, lastCheckpointAt, suspendUntilCopy, checkpoint.Path()); dbErr != nil {
+		// DB persist failed - checkpoint succeeded at container level but state is inconsistent
+		// Log critical error but still signal success since container checkpoint succeeded
+		r.logger.Error().Err(dbErr).Msg("CRITICAL: checkpoint succeeded but DB persist failed - state may be inconsistent on crash")
+	}
+
+	// Signal success to collapsed requests
+	signalCheckpointDone(nil)
 
 	// Schedule the wake timer now that the checkpoint is stored
 	r.jobMu.Lock()
@@ -540,6 +586,16 @@ func (r *JobRunner) Kill(ctx context.Context) (*Job, error) {
 		return nil, fmt.Errorf("job has already terminated")
 	}
 	r.jobMu.RUnlock()
+
+	// Wait for process to be ready (handles race during restore where runner
+	// is in map but process hasn't been set yet)
+	select {
+	case <-r.processReady:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-r.ctx.Done():
+		return nil, fmt.Errorf("job runner cancelled")
+	}
 
 	if err := r.process.Kill(ctx); err != nil {
 		return nil, fmt.Errorf("kill failed: %w", err)
@@ -716,6 +772,11 @@ func (r *JobRunner) persistJobCompleted(state query.JobState, completedAt *time.
 
 // persistJobCheckpointed persists the job checkpoint state to the database.
 func (r *JobRunner) persistJobCheckpointed(state query.JobState, lastCheckpointAt time.Time, suspendUntil *time.Time, checkpointPath string) {
+	_ = r.persistJobCheckpointedWithError(state, lastCheckpointAt, suspendUntil, checkpointPath)
+}
+
+// persistJobCheckpointedWithError persists the job checkpoint state to the database and returns any error.
+func (r *JobRunner) persistJobCheckpointedWithError(state query.JobState, lastCheckpointAt time.Time, suspendUntil *time.Time, checkpointPath string) error {
 	var suspendUntilSQL sql.NullTime
 	if suspendUntil != nil {
 		suspendUntilSQL = sql.NullTime{Time: *suspendUntil, Valid: true}
@@ -731,7 +792,9 @@ func (r *JobRunner) persistJobCheckpointed(state query.JobState, lastCheckpointA
 		})
 	}); dbErr != nil {
 		r.logger.Error().Err(dbErr).Msg("failed to persist job checkpoint state to DB")
+		return dbErr
 	}
+	return nil
 }
 
 // persistJobRetryCount persists the job retry count to the database.
