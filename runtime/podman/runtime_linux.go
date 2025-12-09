@@ -259,7 +259,6 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 	// Restore from exported checkpoint file
 	cmd := exec.CommandContext(ctx, "podman", "container", "restore",
 		"--import", c.exportPath,
-		"--name", containerName,
 		"--tcp-established",
 	)
 	output, err := cmd.CombinedOutput()
