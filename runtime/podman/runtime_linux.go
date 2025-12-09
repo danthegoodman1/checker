@@ -106,12 +106,16 @@ func (h *processHandle) Checkpoint(ctx context.Context, keepRunning bool) (runti
 		if h.logCancel != nil {
 			h.logCancel()
 		}
-		rmCmd := exec.CommandContext(ctx, "podman", "rm", "-f", h.containerID)
+		// Use --volumes to also clean up any associated storage
+		rmCmd := exec.CommandContext(ctx, "podman", "rm", "-f", "--volumes", h.containerID)
 		if rmErr := rmCmd.Run(); rmErr != nil {
 			h.logger.Warn().Err(rmErr).Msg("failed to remove container after checkpoint")
 		} else {
 			h.logger.Debug().Msg("removed container after checkpoint")
 		}
+		// Also run container cleanup to ensure storage is fully released
+		cleanupCmd := exec.CommandContext(ctx, "podman", "container", "cleanup", h.containerID)
+		_ = cleanupCmd.Run() // Ignore errors - container might already be cleaned up
 	}
 
 	return &podmanCheckpoint{
