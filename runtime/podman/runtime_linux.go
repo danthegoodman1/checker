@@ -40,6 +40,10 @@ func (c *podmanCheckpoint) String() string {
 	return fmt.Sprintf("podman-checkpoint[exec=%s,export=%s]", c.executionID, c.exportPath)
 }
 
+func (c *podmanCheckpoint) Path() string {
+	return c.exportPath
+}
+
 func (c *podmanCheckpoint) GracePeriodMs() int64 {
 	return 100
 }

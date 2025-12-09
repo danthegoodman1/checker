@@ -21,6 +21,10 @@ type Checkpoint interface {
 	// String returns a human-readable identifier for logging/debugging
 	String() string
 
+	// Path returns the filesystem path to the checkpoint file/directory.
+	// This is what gets persisted to the database for recovery.
+	Path() string
+
 	// GracePeriodMs returns the time in milliseconds that the worker should wait
 	// after receiving the checkpoint response before the runtime will stop the process.
 	// This allows the worker to be idle (no open connections, no progress) when stopped.

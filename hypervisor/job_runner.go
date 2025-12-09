@@ -394,7 +394,7 @@ func (r *JobRunner) Checkpoint(ctx context.Context, suspendDuration time.Duratio
 	lastCheckpointAt := *r.job.LastCheckpointAt
 	suspendUntilCopy := r.job.SuspendUntil
 	r.jobMu.RUnlock()
-	r.persistJobCheckpointed(dbState, lastCheckpointAt, suspendUntilCopy, checkpoint.String())
+	r.persistJobCheckpointed(dbState, lastCheckpointAt, suspendUntilCopy, checkpoint.Path())
 
 	// Schedule the wake timer now that the checkpoint is stored
 	r.jobMu.Lock()
