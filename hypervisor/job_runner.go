@@ -156,6 +156,7 @@ func (r *JobRunner) Start() error {
 }
 
 // Retry restarts the job with incremented retry count.
+// If a checkpoint exists, restores from checkpoint instead of starting from scratch.
 func (r *JobRunner) Retry() error {
 	r.jobMu.Lock()
 	r.job.RetryCount++
@@ -164,11 +165,61 @@ func (r *JobRunner) Retry() error {
 	r.job.Error = ""
 	r.job.Result = nil
 	r.job.CompletedAt = nil
+	hasCheckpoint := r.checkpoint != nil
 	r.jobMu.Unlock()
 
 	r.persistJobRetryCount(retryCount)
 
+	// If we have a checkpoint, restore from it instead of starting from scratch
+	if hasCheckpoint {
+		r.logger.Info().Int("retry_count", retryCount).Msg("retrying job from checkpoint")
+		return r.restoreFromCheckpoint()
+	}
+
+	r.logger.Info().Int("retry_count", retryCount).Msg("retrying job from start (no checkpoint)")
 	return r.Start()
+}
+
+// restoreFromCheckpoint restores the job from its checkpoint.
+func (r *JobRunner) restoreFromCheckpoint() error {
+	r.jobMu.Lock()
+	r.job.State = JobStateRunning
+	r.job.SuspendUntil = nil
+	r.jobMu.Unlock()
+
+	process, err := r.rt.Restore(r.ctx, runtime.RestoreOptions{
+		Checkpoint: r.checkpoint,
+		Stdout:     r.stdout,
+		Stderr:     r.stderr,
+	})
+	if err != nil {
+		r.logger.Error().Err(err).Msg("failed to restore from checkpoint")
+		r.jobMu.Lock()
+		r.job.State = JobStateFailed
+		r.job.Error = fmt.Sprintf("failed to restore: %v", err)
+		now := time.Now()
+		r.job.CompletedAt = &now
+		r.jobMu.Unlock()
+		return err
+	}
+
+	r.process = process
+	r.logger.Debug().Msg("job restored from checkpoint")
+
+	// Persist running state
+	now := time.Now()
+	if dbErr := query.ReliableExec(r.ctx, r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		return q.UpdateJobStarted(ctx, query.UpdateJobStartedParams{
+			ID:        r.job.ID,
+			StartedAt: sql.NullTime{Time: now, Valid: true},
+		})
+	}); dbErr != nil {
+		r.logger.Error().Err(dbErr).Msg("failed to persist job started state to DB")
+	}
+
+	go r.waitForExit()
+
+	return nil
 }
 
 // SetOnFailure sets the callback for when the job fails.

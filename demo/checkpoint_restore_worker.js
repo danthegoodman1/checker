@@ -87,6 +87,10 @@ async function main() {
   const suspendDuration = params.suspend_duration ?? "4s"
   const skipCheckpoint = params.skip_checkpoint ?? false
   const sleepMs = params.sleep_ms ?? 0
+  // checkpoint_keep_running: checkpoint without suspending (keep running after checkpoint)
+  const checkpointKeepRunning = params.checkpoint_keep_running ?? false
+  // sleep_after_checkpoint_ms: sleep after checkpoint (useful for testing crash scenarios)
+  const sleepAfterCheckpointMs = params.sleep_after_checkpoint_ms ?? 0
 
   // This code runs once before checkpoint
   preCheckpointRuns++
@@ -96,17 +100,30 @@ async function main() {
   const step1Result = { step: 1, value: inputNumber + 1 }
   console.log("Step 1 complete:", step1Result)
 
-  // Optional sleep (useful for testing container kill scenarios)
+  // Optional sleep before checkpoint (useful for testing container kill scenarios)
   if (sleepMs > 0) {
     console.log(`Sleeping for ${sleepMs}ms...`)
     await new Promise((resolve) => setTimeout(resolve, sleepMs))
   }
 
-  // Checkpoint and suspend - with CRIU, execution continues from here after restore
+  // Checkpoint - with CRIU, execution continues from here after restore
   if (!skipCheckpoint) {
-    console.log("Checkpointing with suspend...")
-    const checkpointResult = await checkpoint(suspendDuration)
-    console.log("Checkpoint complete:", JSON.stringify(checkpointResult))
+    if (checkpointKeepRunning) {
+      console.log("Checkpointing (keep running)...")
+      // Pass null/undefined for suspend_duration to keep running
+      const checkpointResult = await checkpoint(null)
+      console.log("Checkpoint complete (still running):", JSON.stringify(checkpointResult))
+    } else {
+      console.log("Checkpointing with suspend...")
+      const checkpointResult = await checkpoint(suspendDuration)
+      console.log("Checkpoint complete:", JSON.stringify(checkpointResult))
+    }
+  }
+
+  // Optional sleep after checkpoint (for testing: crash while running after checkpoint)
+  if (sleepAfterCheckpointMs > 0) {
+    console.log(`Sleeping for ${sleepAfterCheckpointMs}ms after checkpoint...`)
+    await new Promise((resolve) => setTimeout(resolve, sleepAfterCheckpointMs))
   }
 
   // This code runs after restore

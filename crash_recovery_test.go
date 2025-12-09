@@ -587,19 +587,20 @@ func TestCrashRecoveryFullServerCrash(t *testing.T) {
 	_, _ = pool.Exec(ctx, "DELETE FROM job_definitions WHERE name = $1", "full-crash-test")
 }
 
-// TestContainerCrashWhileRunning verifies that when a container is killed while
-// the job is actively running (not suspended), the hypervisor detects this and
-// marks the job as failed appropriately.
+// TestProcessCrashRestoreFromCheckpoint verifies that when a running process crashes
+// after creating a checkpoint, the hypervisor automatically restores from checkpoint
+// on retry instead of starting from scratch.
 //
 // This test:
-// 1. Starts a hypervisor and spawns a job
-// 2. Waits for the job to start running
-// 3. Force kills the container while it's running
-// 4. Hypervisor stays running and should detect the failure
-// 5. Verifies the job is marked as failed
-func TestContainerCrashWhileRunning(t *testing.T) {
+// 1. Starts a hypervisor and spawns a job with retry policy
+// 2. Job checkpoints with keep_running=true (continues running after checkpoint)
+// 3. Job sleeps (giving us time to kill it)
+// 4. Kill the container while job is running
+// 5. Hypervisor detects failure and retries from checkpoint
+// 6. Verifies the job completes successfully with correct output
+func TestProcessCrashRestoreFromCheckpoint(t *testing.T) {
 	if goruntime.GOOS != "linux" {
-		t.Skip("Container crash test requires Linux (Podman)")
+		t.Skip("Process crash recovery test requires Linux (Podman)")
 	}
 
 	if utils.PG_DSN == "" {
@@ -651,34 +652,45 @@ func TestContainerCrashWhileRunning(t *testing.T) {
 
 	require.NoError(t, h.RegisterRuntime(podmanRuntime))
 
+	// Job definition with retry policy - this is key!
 	jd := &hypervisor.JobDefinition{
-		Name:        "container-crash-running-test",
+		Name:        "process-crash-checkpoint-test",
 		Version:     "1.0.0",
 		RuntimeType: runtime.RuntimeTypePodman,
 		Config: &podman.Config{
 			Image:   "checker-checkpoint-restore-test:latest",
 			Network: "host",
 		},
+		RetryPolicy: &hypervisor.RetryPolicy{
+			MaxRetries: 3,
+			RetryDelay: "100ms",
+		},
 	}
 	require.NoError(t, h.RegisterJobDefinition(jd))
 
-	// Use skip_checkpoint=true with a long sleep so the job runs long enough for us to kill it
+	// Spawn job that will:
+	// 1. Do step 1 (add 1)
+	// 2. Checkpoint with keep_running=true
+	// 3. Sleep for 60 seconds (we'll kill it during this sleep)
+	// 4. Do step 2 (double the value) - this runs after restore
 	jobID, err := h.Spawn(ctx, hypervisor.SpawnOptions{
-		DefinitionName:    "container-crash-running-test",
+		DefinitionName:    "process-crash-checkpoint-test",
 		DefinitionVersion: "1.0.0",
-		// skip_checkpoint=true means the job will run through without checkpointing
-		// sleep_ms adds a delay so we have time to kill the container while it's running
-		Params: json.RawMessage(`{"number": 10, "skip_checkpoint": true, "sleep_ms": 30000}`),
+		Params: json.RawMessage(`{
+			"number": 5,
+			"checkpoint_keep_running": true,
+			"sleep_after_checkpoint_ms": 60000
+		}`),
 		Stdout: &testLogWriter{t: t, prefix: "[stdout]"},
 		Stderr: &testLogWriter{t: t, prefix: "[stderr]"},
 	})
 	require.NoError(t, err)
 	t.Logf("Spawned job: %s", jobID)
 
-	// Wait for job to be running
-	t.Log("Waiting for job to start running...")
-	var running bool
-	for i := 0; i < 30; i++ {
+	// Wait for job to checkpoint (it will still be running after checkpoint)
+	t.Log("Waiting for job to checkpoint...")
+	var checkpointed bool
+	for i := 0; i < 60; i++ {
 		var dbJob query.Job
 		err := query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 			var err error
@@ -687,32 +699,35 @@ func TestContainerCrashWhileRunning(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		if dbJob.State == query.JobStateRunning {
-			running = true
-			t.Log("Job is now running")
+		if dbJob.CheckpointCount > 0 {
+			checkpointed = true
+			t.Logf("Job has checkpointed (checkpoint_count=%d, state=%s)", dbJob.CheckpointCount, dbJob.State)
 			break
 		}
-		time.Sleep(200 * time.Millisecond)
+		if dbJob.State == query.JobStateFailed || dbJob.State == query.JobStateCompleted {
+			t.Fatalf("Job reached terminal state before checkpointing: %s", dbJob.State)
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
-	require.True(t, running, "Job did not reach running state")
+	require.True(t, checkpointed, "Job did not checkpoint")
 
-	// Give the job a moment to actually start executing
+	// Give the job a moment to start sleeping after checkpoint
 	time.Sleep(1 * time.Second)
 
-	// Phase 2: Kill the container while it's running
-	t.Log("=== Phase 2: Killing container while running ===")
+	// Phase 2: Kill the container while it's running (after checkpoint)
+	t.Log("=== Phase 2: Killing container while running (after checkpoint) ===")
 
 	containerName := fmt.Sprintf("checker-%s", jobID)
 	killCmd := exec.Command("podman", "kill", containerName)
 	killOutput, err := killCmd.CombinedOutput()
 	t.Logf("Killed container %s: %s (err: %v)", containerName, string(killOutput), err)
 
-	// Phase 3: Wait for hypervisor to detect the failure
-	t.Log("=== Phase 3: Waiting for hypervisor to detect failure ===")
+	// Phase 3: Wait for hypervisor to detect failure, retry from checkpoint, and complete
+	t.Log("=== Phase 3: Waiting for retry from checkpoint and completion ===")
 
 	var completed bool
 	var finalState query.JobState
-	for i := 0; i < 60; i++ {
+	for i := 0; i < 120; i++ {
 		var dbJob query.Job
 		err := query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 			var err error
@@ -724,23 +739,47 @@ func TestContainerCrashWhileRunning(t *testing.T) {
 		finalState = dbJob.State
 		if dbJob.State == query.JobStateCompleted || dbJob.State == query.JobStateFailed {
 			completed = true
-			t.Logf("Job finished with state: %s", dbJob.State)
+			t.Logf("Job finished with state: %s (retry_count=%d)", dbJob.State, dbJob.RetryCount)
+			if dbJob.ResultOutput != nil {
+				t.Logf("Job output: %s", string(dbJob.ResultOutput))
+			}
 			if dbJob.Error.Valid {
 				t.Logf("Job error: %s", dbJob.Error.String)
 			}
 			break
 		}
-		t.Logf("Job state: %s, waiting...", dbJob.State)
+		t.Logf("Job state: %s, retry_count: %d, waiting...", dbJob.State, dbJob.RetryCount)
 		time.Sleep(500 * time.Millisecond)
 	}
-	require.True(t, completed, "Job did not reach terminal state")
+	require.True(t, completed, "Job did not complete")
+	assert.Equal(t, query.JobStateCompleted, finalState, "Job should have completed successfully after retry from checkpoint")
 
-	// The job should have failed because we killed it
-	assert.Equal(t, query.JobStateFailed, finalState, "Job should have failed after container was killed")
+	// Verify the result: (5 + 1) * 2 = 12
+	var dbJob query.Job
+	err = query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		var err error
+		dbJob, err = q.GetJob(ctx, jobID)
+		return err
+	})
+	require.NoError(t, err)
 
-	t.Log("=== Container crash while running test PASSED ===")
+	assert.Equal(t, int32(0), dbJob.ResultExitCode.Int32, "Exit code should be 0")
+	assert.GreaterOrEqual(t, dbJob.RetryCount, int32(1), "Job should have retried at least once")
+
+	var output struct {
+		Result struct {
+			Value int `json:"value"`
+		} `json:"result"`
+		PreCheckpointRuns int `json:"pre_checkpoint_runs"`
+	}
+	require.NoError(t, json.Unmarshal(dbJob.ResultOutput, &output))
+	assert.Equal(t, 12, output.Result.Value, "Expected (5 + 1) * 2 = 12")
+	// With checkpoint restore, pre-checkpoint code should only run once (not re-run on retry)
+	assert.Equal(t, 1, output.PreCheckpointRuns, "Pre-checkpoint code should only run once with checkpoint restore")
+
+	t.Log("=== Process crash restore from checkpoint test PASSED ===")
 
 	// Cleanup
 	_, _ = pool.Exec(ctx, "DELETE FROM jobs WHERE id = $1", jobID)
-	_, _ = pool.Exec(ctx, "DELETE FROM job_definitions WHERE name = $1", "container-crash-running-test")
+	_, _ = pool.Exec(ctx, "DELETE FROM job_definitions WHERE name = $1", "process-crash-checkpoint-test")
 }
