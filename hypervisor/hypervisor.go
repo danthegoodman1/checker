@@ -1235,25 +1235,23 @@ func (h *Hypervisor) wakeJob(ctx context.Context, dbJob query.Job) error {
 		}
 	})
 
-	h.runnersMu.Lock()
-	h.runners[dbJob.ID] = runner
-	h.runnersMu.Unlock()
-
 	process, err := rt.Restore(ctx, runtime.RestoreOptions{
 		Checkpoint: checkpoint,
 		Stdout:     nil, // TODO: Support stdout/stderr for restored jobs
 		Stderr:     nil,
 	})
 	if err != nil {
-		h.runnersMu.Lock()
-		delete(h.runners, dbJob.ID)
-		h.runnersMu.Unlock()
-
 		runner.persistJobCompleted(query.JobStateFailed, utils.Ptr(time.Now()), nil, fmt.Sprintf("failed to restore: %v", err))
 		return fmt.Errorf("failed to restore from checkpoint: %w", err)
 	}
 
 	runner.process = process
+
+	// Add to runners map AFTER process is set to avoid race condition where
+	// the restored container tries to checkpoint before process is assigned
+	h.runnersMu.Lock()
+	h.runners[dbJob.ID] = runner
+	h.runnersMu.Unlock()
 
 	runner.jobMu.Lock()
 	runner.job.State = JobStateRunning
