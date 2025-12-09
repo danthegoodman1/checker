@@ -1031,6 +1031,17 @@ func (h *Hypervisor) scheduleJobWake(ctx context.Context, dbJob query.Job) error
 
 	runner.scheduleSuspendWake(dbJob.SuspendUntil.Time)
 
+	// Start eviction goroutine
+	go func() {
+		<-runner.Done()
+		job, err := runner.GetState(h.ctx)
+		if err != nil {
+			logger.Error().Err(err).Str("job_id", dbJob.ID).Msg("failed to get job state for eviction")
+			return
+		}
+		h.maybeEvictJob(dbJob.ID, job)
+	}()
+
 	return nil
 }
 

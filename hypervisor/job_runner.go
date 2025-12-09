@@ -213,6 +213,7 @@ func (r *JobRunner) restoreFromCheckpoint() error {
 	}
 
 	r.process = process
+	r.signalProcessReady()
 	r.logger.Debug().Msg("job restored from checkpoint")
 
 	now := time.Now()
@@ -364,6 +365,9 @@ func (r *JobRunner) scheduleSuspendWake(wakeTime time.Time) {
 		r.job.SuspendUntil = nil
 		r.jobMu.Unlock()
 
+		// Persist the state change to DB
+		r.persistJobState(query.JobStateRunning)
+
 		process, err := r.rt.Restore(r.ctx, runtime.RestoreOptions{
 			Checkpoint: r.checkpoint,
 			Stdout:     r.stdout,
@@ -377,11 +381,13 @@ func (r *JobRunner) scheduleSuspendWake(wakeTime time.Time) {
 			now := time.Now()
 			r.job.CompletedAt = &now
 			r.jobMu.Unlock()
+			r.persistJobCompleted(query.JobStateFailed, r.job.CompletedAt, nil, r.job.Error)
 			r.MarkDone()
 			return
 		}
 
 		r.process = process
+		r.signalProcessReady()
 		r.logger.Debug().Msg("job restored from checkpoint")
 
 		go r.waitForExit()
