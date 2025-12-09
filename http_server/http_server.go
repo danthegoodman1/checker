@@ -145,6 +145,15 @@ func (s *HTTPServer) Shutdown(ctx context.Context) error {
 	return nil
 }
 
+// Close forcibly closes the server without waiting for connections to drain.
+// Used for testing crash scenarios.
+func (s *HTTPServer) Close() error {
+	if s.quicServer != nil {
+		s.quicServer.Close()
+	}
+	return s.Echo.Close()
+}
+
 func LoggerMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		start := time.Now()

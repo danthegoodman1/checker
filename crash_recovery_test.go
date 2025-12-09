@@ -277,6 +277,10 @@ func TestCrashRecoveryPendingJob(t *testing.T) {
 	jdName := "crash-recovery-pending-test"
 	jdVersion := "1.0.0"
 
+	// Allocate port first so we can include it in env
+	port := portCounter.Add(2)
+	runtimeAddr := fmt.Sprintf("0.0.0.0:%d", port+1)
+
 	// First, insert the job definition
 	configJSON, _ := json.Marshal(&podman.Config{
 		Image:   "checker-checkpoint-restore-test:latest",
@@ -289,22 +293,29 @@ func TestCrashRecoveryPendingJob(t *testing.T) {
 	`, jdName, jdVersion, runtime.RuntimeTypePodman, configJSON)
 	require.NoError(t, err)
 
-	// Insert the pending job
+	// Insert the pending job with proper env (normally set by Spawn)
 	params, _ := json.Marshal(map[string]any{"number": 7, "skip_checkpoint": true})
+	env, _ := json.Marshal(map[string]string{
+		"CHECKER_JOB_ID":                 jobID,
+		"CHECKER_JOB_DEFINITION_NAME":    jdName,
+		"CHECKER_JOB_DEFINITION_VERSION": jdVersion,
+		"CHECKER_JOB_SPAWNED_AT":         fmt.Sprintf("%d", time.Now().Unix()),
+		"CHECKER_ARCH":                   goruntime.GOARCH,
+		"CHECKER_OS":                     goruntime.GOOS,
+	})
 	_, err = pool.Exec(ctx, `
 		INSERT INTO jobs (id, definition_name, definition_version, state, env, params, 
 		                  runtime_type, runtime_config, metadata, created_at)
-		VALUES ($1, $2, $3, 'pending', '{}', $4, $5, $6, '{}', NOW())
-	`, jobID, jdName, jdVersion, params, runtime.RuntimeTypePodman, configJSON)
+		VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, '{}', NOW())
+	`, jobID, jdName, jdVersion, env, params, runtime.RuntimeTypePodman, configJSON)
 	require.NoError(t, err)
 
 	t.Logf("Inserted pending job: %s", jobID)
 
 	// Start hypervisor and recover
-	port := portCounter.Add(2)
 	h := hypervisor.New(hypervisor.Config{
 		CallerHTTPAddress:  fmt.Sprintf("127.0.0.1:%d", port),
-		RuntimeHTTPAddress: fmt.Sprintf("0.0.0.0:%d", port+1),
+		RuntimeHTTPAddress: runtimeAddr,
 		Pool:               pool,
 	})
 	defer func() {
@@ -479,16 +490,10 @@ func TestCrashRecoveryFullServerCrash(t *testing.T) {
 	killOutput, _ := killCmd.CombinedOutput()
 	t.Logf("Force killed container %s: %s", containerName, string(killOutput))
 
-	// Close the runtime (cleanup) but DON'T gracefully shutdown hypervisor
-	// This simulates the hypervisor process dying suddenly
+	// Simulate crash - forcibly close without graceful shutdown
+	h1.DevCrash()
 	podmanRuntime1.Close()
-
-	// Let the hypervisor "crash" by just abandoning it
-	// In a real crash, the process would just die
-	t.Log("Hypervisor 'crashed' (abandoned without shutdown)")
-
-	// Small delay to ensure sockets are released
-	time.Sleep(1 * time.Second)
+	t.Log("Hypervisor 'crashed' (DevCrash called)")
 
 	// Phase 3: Start NEW hypervisor and recover
 	t.Log("=== Phase 3: Starting new hypervisor and recovering ===")

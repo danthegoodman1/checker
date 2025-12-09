@@ -651,6 +651,15 @@ func (h *Hypervisor) Shutdown(ctx context.Context) error {
 	return nil
 }
 
+// DevCrash forcibly closes the hypervisor without graceful shutdown.
+// This simulates a crash scenario for testing - it releases ports immediately
+// but doesn't wait for jobs to complete or clean up properly.
+func (h *Hypervisor) DevCrash() {
+	h.cancel()
+	h.callerHTTPServer.Close()
+	h.runtimeHTTPServer.Close()
+}
+
 // maybeEvictJob evicts a job from memory if it's in a terminal state or sleeping for more than 10 seconds.
 // This is safe because the DB is the source of truth - jobs can be reloaded when needed.
 func (h *Hypervisor) maybeEvictJob(jobID string, job *Job) {
