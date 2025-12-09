@@ -259,6 +259,14 @@ func (r *JobRunner) scheduleSuspendWake(wakeTime time.Time) {
 		Msg("scheduling suspend wake")
 
 	time.AfterFunc(delay, func() {
+		// Check if context is cancelled (e.g., hypervisor crashed)
+		select {
+		case <-r.ctx.Done():
+			r.logger.Debug().Msg("suspend wake timer fired but context cancelled, skipping restore")
+			return
+		default:
+		}
+
 		r.logger.Debug().Msg("suspend wake timer fired, restoring job")
 
 		r.jobMu.Lock()

@@ -657,6 +657,14 @@ func (h *Hypervisor) Shutdown(ctx context.Context) error {
 // but doesn't wait for jobs to complete or clean up properly.
 func (h *Hypervisor) DevCrash() {
 	h.cancel()
+
+	// Cancel all runner contexts to stop any pending timers (e.g., scheduleSuspendWake)
+	h.runnersMu.RLock()
+	for _, runner := range h.runners {
+		runner.Cancel()
+	}
+	h.runnersMu.RUnlock()
+
 	h.callerHTTPServer.Close()
 	h.runtimeHTTPServer.Close()
 }
