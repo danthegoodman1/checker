@@ -770,11 +770,6 @@ func (r *JobRunner) persistJobCompleted(state query.JobState, completedAt *time.
 	}
 }
 
-// persistJobCheckpointed persists the job checkpoint state to the database.
-func (r *JobRunner) persistJobCheckpointed(state query.JobState, lastCheckpointAt time.Time, suspendUntil *time.Time, checkpointPath string) {
-	_ = r.persistJobCheckpointedWithError(state, lastCheckpointAt, suspendUntil, checkpointPath)
-}
-
 // persistJobCheckpointedWithError persists the job checkpoint state to the database and returns any error.
 func (r *JobRunner) persistJobCheckpointedWithError(state query.JobState, lastCheckpointAt time.Time, suspendUntil *time.Time, checkpointPath string) error {
 	var suspendUntilSQL sql.NullTime
