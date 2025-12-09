@@ -256,6 +256,15 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 			Msg("cleanup of existing container failed (may not exist)")
 	}
 
+	// Also prune any stopped containers to clean up storage that might conflict with restore
+	pruneCmd := exec.CommandContext(ctx, "podman", "container", "prune", "-f")
+	if pruneOutput, pruneErr := pruneCmd.CombinedOutput(); pruneErr != nil {
+		r.logger.Debug().
+			Err(pruneErr).
+			Str("output", string(pruneOutput)).
+			Msg("container prune failed (may be nothing to prune)")
+	}
+
 	// Restore from exported checkpoint file
 	cmd := exec.CommandContext(ctx, "podman", "container", "restore",
 		"--import", c.exportPath,

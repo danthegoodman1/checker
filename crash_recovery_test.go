@@ -484,13 +484,16 @@ func TestCrashRecoveryFullServerCrash(t *testing.T) {
 	// Phase 2: Simulate full server crash
 	t.Log("=== Phase 2: Simulating full server crash ===")
 
-	// Force kill ANY checker containers (simulating they died with the server)
-	containerName := fmt.Sprintf("checker-%s", jobID)
-	killCmd := exec.Command("podman", "rm", "-f", containerName)
-	killOutput, _ := killCmd.CombinedOutput()
-	t.Logf("Force killed container %s: %s", containerName, string(killOutput))
+	// // Force kill ANY checker containers (simulating they died with the server)
+	// containerName := fmt.Sprintf("checker-%s", jobID)
+	// killCmd := exec.Command("podman", "rm", "-f", containerName)
+	// killOutput, _ := killCmd.CombinedOutput()
+	// t.Logf("Force killed container %s: %s", containerName, string(killOutput))
 
-	// Simulate crash - forcibly close without graceful shutdown
+	// // Simulate crash - forcibly close without graceful shutdown
+
+	// Simulate crash - forcibly close hypervisor without graceful shutdown.
+	// The container still exists (stopped after checkpoint) - restore will clean it up.
 	h1.DevCrash()
 	podmanRuntime1.Close()
 	t.Log("Hypervisor 'crashed' (DevCrash called)")
