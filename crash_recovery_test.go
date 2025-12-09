@@ -78,6 +78,7 @@ func TestCrashRecoveryHypervisor(t *testing.T) {
 		CallerHTTPAddress:  callerAddr,
 		RuntimeHTTPAddress: runtimeAddr,
 		Pool:               pool,
+		WakePollerInterval: 500 * time.Millisecond, // Fast polling for tests
 	})
 
 	podmanRuntime, err := podman.NewRuntime()
@@ -102,7 +103,7 @@ func TestCrashRecoveryHypervisor(t *testing.T) {
 	jobID, err := h1.Spawn(ctx, hypervisor.SpawnOptions{
 		DefinitionName:    "crash-recovery-test",
 		DefinitionVersion: "1.0.0",
-		Params:            json.RawMessage(`{"number": 5, "suspend_duration": "5s"}`),
+		Params:            json.RawMessage(`{"number": 5, "suspend_duration": "1s"}`),
 		Stdout:            &testLogWriter{t: t, prefix: "[stdout]"},
 		Stderr:            &testLogWriter{t: t, prefix: "[stderr]"},
 	})
@@ -112,7 +113,7 @@ func TestCrashRecoveryHypervisor(t *testing.T) {
 	// Wait for job to be suspended (poll the database)
 	t.Log("Waiting for job to be suspended...")
 	var suspended bool
-	for i := 0; i < 60; i++ { // Wait up to 30 seconds
+	for i := 0; i < 100; i++ { // Wait up to 10 seconds
 		var dbJob query.Job
 		err := query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 			var err error
@@ -131,7 +132,7 @@ func TestCrashRecoveryHypervisor(t *testing.T) {
 			t.Fatalf("Job failed with error: %s", dbJob.Error.String)
 		}
 		t.Logf("Job state: %s, waiting...", dbJob.State)
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 	require.True(t, suspended, "Job did not reach suspended state")
 
@@ -141,7 +142,7 @@ func TestCrashRecoveryHypervisor(t *testing.T) {
 	podmanRuntime.Close()
 
 	// Small delay to ensure everything is cleaned up
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	// Phase 3: Start NEW hypervisor and recover
 	t.Log("=== Phase 3: Starting new hypervisor and recovering state ===")
@@ -152,6 +153,7 @@ func TestCrashRecoveryHypervisor(t *testing.T) {
 		CallerHTTPAddress:  callerAddr,
 		RuntimeHTTPAddress: runtimeAddr,
 		Pool:               pool,
+		WakePollerInterval: 500 * time.Millisecond, // Fast polling for tests
 	})
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -180,7 +182,7 @@ func TestCrashRecoveryHypervisor(t *testing.T) {
 	t.Log("Waiting for job to complete...")
 	var completed bool
 	var finalState query.JobState
-	for i := 0; i < 120; i++ { // Wait up to 60 seconds
+	for i := 0; i < 200; i++ { // Wait up to 20 seconds
 		var dbJob query.Job
 		err := query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 			var err error
@@ -202,7 +204,7 @@ func TestCrashRecoveryHypervisor(t *testing.T) {
 			break
 		}
 		t.Logf("Job state: %s, waiting...", dbJob.State)
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 	require.True(t, completed, "Job did not complete")
 	assert.Equal(t, query.JobStateCompleted, finalState, "Job should have completed successfully")
@@ -315,6 +317,7 @@ func TestCrashRecoveryPendingJob(t *testing.T) {
 		CallerHTTPAddress:  fmt.Sprintf("127.0.0.1:%d", port),
 		RuntimeHTTPAddress: runtimeAddr,
 		Pool:               pool,
+		WakePollerInterval: 500 * time.Millisecond, // Fast polling for tests
 	})
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -335,7 +338,7 @@ func TestCrashRecoveryPendingJob(t *testing.T) {
 	t.Log("Waiting for pending job to complete...")
 	var completed bool
 	var finalState query.JobState
-	for i := 0; i < 120; i++ {
+	for i := 0; i < 200; i++ { // Wait up to 20 seconds
 		var dbJob query.Job
 		err := query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 			var err error
@@ -351,7 +354,7 @@ func TestCrashRecoveryPendingJob(t *testing.T) {
 			break
 		}
 		t.Logf("Job state: %s, waiting...", dbJob.State)
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 	require.True(t, completed, "Job did not complete")
 	assert.Equal(t, query.JobStateCompleted, finalState, "Job should have completed successfully")

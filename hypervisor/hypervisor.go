@@ -49,6 +49,9 @@ type Hypervisor struct {
 
 	// Database pool for job persistence
 	pool *pgxpool.Pool
+
+	// Wake poller interval
+	wakePollerInterval time.Duration
 }
 
 // Config holds configuration options for creating a Hypervisor.
@@ -65,6 +68,10 @@ type Config struct {
 	// Pool is the database connection pool for job persistence.
 	// Required for durable job storage.
 	Pool *pgxpool.Pool
+
+	// WakePollerInterval is how often to poll for suspended jobs to wake.
+	// Defaults to 5 seconds if not set.
+	WakePollerInterval time.Duration
 }
 
 // New creates a new Hypervisor instance.
@@ -88,6 +95,13 @@ func New(cfg Config) *Hypervisor {
 
 	h.callerHTTPAddress = cfg.CallerHTTPAddress
 	h.runtimeHTTPAddress = cfg.RuntimeHTTPAddress
+
+	// Set wake poller interval with default
+	if cfg.WakePollerInterval > 0 {
+		h.wakePollerInterval = cfg.WakePollerInterval
+	} else {
+		h.wakePollerInterval = 5 * time.Second
+	}
 
 	// Run migrations
 	migrations.RunMigrations(utils.PG_DSN)
@@ -1120,7 +1134,7 @@ func (h *Hypervisor) recoverJobDefinitions(ctx context.Context) error {
 
 // startWakePoller starts a background goroutine that polls for suspended jobs to wake.
 func (h *Hypervisor) startWakePoller() {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(h.wakePollerInterval)
 	go func() {
 		for {
 			select {
