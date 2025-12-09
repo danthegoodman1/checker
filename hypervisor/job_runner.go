@@ -106,6 +106,12 @@ func (r *JobRunner) signalProcessReady() {
 	})
 }
 
+// Cancel cancels the runner's context, which will unblock any pending requests
+// waiting on processReady or other operations.
+func (r *JobRunner) Cancel() {
+	r.cancel()
+}
+
 func (r *JobRunner) Start() error {
 	process, err := r.rt.Start(r.ctx, runtime.StartOptions{
 		ExecutionID:    r.job.ID,
@@ -325,6 +331,9 @@ func (r *JobRunner) Checkpoint(ctx context.Context, suspendDuration time.Duratio
 	case <-r.processReady:
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	case <-r.ctx.Done():
+		// Runner context cancelled (e.g., restore failed)
+		return nil, fmt.Errorf("job runner cancelled")
 	}
 
 	// Check for idempotent replay (retry after restore)

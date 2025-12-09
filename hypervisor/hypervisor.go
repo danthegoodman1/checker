@@ -1248,6 +1248,9 @@ func (h *Hypervisor) wakeJob(ctx context.Context, dbJob query.Job) error {
 		Stderr:     nil,
 	})
 	if err != nil {
+		// Cancel runner context to unblock any pending checkpoint requests
+		runner.Cancel()
+
 		h.runnersMu.Lock()
 		delete(h.runners, dbJob.ID)
 		h.runnersMu.Unlock()

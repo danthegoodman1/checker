@@ -276,6 +276,10 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		// If restore failed, clean up any container that might have been created.
+		// The container name is deterministic, so we can clean it up even if we don't have the ID.
+		cleanupAfterFailCmd := exec.CommandContext(ctx, "podman", "rm", "-f", "--ignore", containerName)
+		_ = cleanupAfterFailCmd.Run()
 		return nil, fmt.Errorf("failed to restore container from checkpoint: %w, output: %s", err, string(output))
 	}
 
