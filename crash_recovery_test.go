@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/danthegoodman1/checker/hypervisor"
+	"github.com/danthegoodman1/checker/migrations"
 	"github.com/danthegoodman1/checker/pg"
 	"github.com/danthegoodman1/checker/query"
 	"github.com/danthegoodman1/checker/runtime"
@@ -43,6 +44,10 @@ func TestCrashRecovery(t *testing.T) {
 	if utils.PG_DSN == "" {
 		t.Skip("PG_DSN environment variable not set")
 	}
+
+	// Run migrations
+	_, err := migrations.RunMigrations(utils.PG_DSN)
+	require.NoError(t, err)
 
 	// Connect to database
 	pool, err := pgxpool.New(context.Background(), utils.PG_DSN)
@@ -243,6 +248,10 @@ func TestCrashRecoveryPendingJob(t *testing.T) {
 		t.Skip("PG_DSN environment variable not set")
 	}
 
+	// Run migrations
+	_, err := migrations.RunMigrations(utils.PG_DSN)
+	require.NoError(t, err)
+
 	pool, err := pgxpool.New(context.Background(), utils.PG_DSN)
 	require.NoError(t, err)
 	defer pool.Close()
@@ -380,6 +389,10 @@ func TestCrashRecoveryFullServerCrash(t *testing.T) {
 	if utils.PG_DSN == "" {
 		t.Skip("PG_DSN environment variable not set")
 	}
+
+	// Run migrations
+	_, err := migrations.RunMigrations(utils.PG_DSN)
+	require.NoError(t, err)
 
 	pool, err := pgxpool.New(context.Background(), utils.PG_DSN)
 	require.NoError(t, err)
