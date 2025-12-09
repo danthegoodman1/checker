@@ -19,8 +19,8 @@ import (
 
 	"github.com/quic-go/quic-go/http3"
 
-	"github.com/danthegoodman1/GoAPITemplate/gologger"
-	"github.com/danthegoodman1/GoAPITemplate/utils"
+	"github.com/danthegoodman1/checker/gologger"
+	"github.com/danthegoodman1/checker/utils"
 	"github.com/go-playground/validator/v10"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -143,6 +143,15 @@ func (s *HTTPServer) Shutdown(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// Close forcibly closes the server without waiting for connections to drain.
+// Used for testing crash scenarios.
+func (s *HTTPServer) Close() error {
+	if s.quicServer != nil {
+		s.quicServer.Close()
+	}
+	return s.Echo.Close()
 }
 
 func LoggerMiddleware(next echo.HandlerFunc) echo.HandlerFunc {

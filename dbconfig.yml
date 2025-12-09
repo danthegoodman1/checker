@@ -1,0 +1,11 @@
+local:
+  dialect: postgres
+  datasource: dbname=psotgres sslmode=disable host=localhost port=5432 user=postgres password=postgres
+  dir: migrations
+  table: migrations
+
+prod:
+  dialect: postgres
+  datasource: ${PG_DSN}
+  dir: migrations
+  table: migrations

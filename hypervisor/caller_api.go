@@ -56,7 +56,7 @@ func (h *Hypervisor) handleRegisterJobDefinition(c echo.Context) error {
 		Metadata:    req.Metadata,
 	}
 
-	if err := h.RegisterJobDefinition(jd); err != nil {
+	if err := h.RegisterJobDefinition(c.Request().Context(), jd); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
 
@@ -74,7 +74,7 @@ func (h *Hypervisor) handleUnregisterJobDefinition(c echo.Context) error {
 		return err
 	}
 
-	if err := h.UnregisterJobDefinition(req.Name, req.Version); err != nil {
+	if err := h.UnregisterJobDefinition(c.Request().Context(), req.Name, req.Version); err != nil {
 		return echo.NewHTTPError(http.StatusNotFound, err.Error())
 	}
 
@@ -137,12 +137,44 @@ func (h *Hypervisor) handleSpawn(c echo.Context) error {
 	return c.JSON(http.StatusCreated, SpawnResponse{JobID: jobID})
 }
 
+type ListJobsRequest struct {
+	Limit  int32  `query:"limit"`
+	Cursor string `query:"cursor"`
+}
+
+type ListJobsResponse struct {
+	Jobs       []*Job  `json:"jobs"`
+	NextCursor *string `json:"next_cursor,omitempty"`
+}
+
+const (
+	defaultListJobsLimit = 100
+	maxListJobsLimit     = 1000
+)
+
 func (h *Hypervisor) handleListJobs(c echo.Context) error {
-	jobs, err := h.ListJobs(c.Request().Context())
+	var req ListJobsRequest
+	if err := http_server.ValidateRequest(c, &req); err != nil {
+		return err
+	}
+
+	// Apply defaults and constraints
+	if req.Limit <= 0 {
+		req.Limit = defaultListJobsLimit
+	}
+	if req.Limit > maxListJobsLimit {
+		req.Limit = maxListJobsLimit
+	}
+
+	jobs, nextCursor, err := h.ListJobs(c.Request().Context(), req.Limit, req.Cursor)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	return c.JSON(http.StatusOK, jobs)
+
+	return c.JSON(http.StatusOK, ListJobsResponse{
+		Jobs:       jobs,
+		NextCursor: nextCursor,
+	})
 }
 
 type GetJobRequest struct {

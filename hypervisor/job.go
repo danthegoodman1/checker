@@ -15,9 +15,6 @@ const (
 	// JobStateRunning means the job is currently running.
 	JobStateRunning JobState = "running"
 
-	// JobStateCheckpointed means the job has been checkpointed and is paused.
-	JobStateCheckpointed JobState = "checkpointed"
-
 	// JobStateSuspended means the job is suspended (checkpointed + scheduled for later wake).
 	JobStateSuspended JobState = "suspended"
 
@@ -154,7 +151,7 @@ func (j *Job) IsTerminal() bool {
 	return j.State == JobStateCompleted || j.State == JobStateFailed
 }
 
-// IsRunning returns true if the job is actively running (not checkpointed/suspended).
+// IsRunning returns true if the job is actively running (not suspended).
 func (j *Job) IsRunning() bool {
 	return j.State == JobStateRunning
 }

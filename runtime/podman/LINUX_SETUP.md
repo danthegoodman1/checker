@@ -34,86 +34,60 @@ criu --version
 sudo criu check
 ```
 
-### 3. Enable Podman Socket
+### 3. Configure Podman for Checkpoint/Restore
 
-The Podman runtime uses the Podman API socket for communication.
-
-**For rootless (recommended for development):**
-```bash
-# Enable and start the user socket
-systemctl --user enable podman.socket
-systemctl --user start podman.socket
-
-# Verify it's running
-systemctl --user status podman.socket
-
-# The socket will be at /run/user/$UID/podman/podman.sock
-```
-
-**For root (production):**
-```bash
-# Enable and start the system socket
-sudo systemctl enable podman.socket
-sudo systemctl start podman.socket
-
-# Verify it's running
-sudo systemctl status podman.socket
-
-# The socket will be at /run/podman/podman.sock
-```
-
-## Configuration
-
-### Environment Variables
-
-- `PODMAN_SOCKET`: Override the default socket path (e.g., `unix:///custom/path/podman.sock`)
-
-### Network Mode
-
-For checkpoint/restore compatibility, use **host networking**:
-
-```json
-{
-  "image": "your-worker-image:latest",
-  "network": "host"
-}
-```
-
-Host networking avoids network namespace issues during checkpoint/restore.
-
-### Checkpoint Storage
-
-Checkpoints are exported to:
-```
-/tmp/checker/podman-checkpoints/<execution-id>/checkpoint-<execution-id>.tar.gz
-```
-
-These are portable tar files that can be moved to other nodes for restore.
-
-## Verify Setup
-
-Test that checkpoint/restore works:
+Podman needs to be configured to use `runc` as the OCI runtime and `cgroupfs` as the cgroup manager. The default `systemd` cgroup manager has issues with checkpoint/restore where the systemd transient scope gets cleaned up immediately after restore, causing containers to exit.
 
 ```bash
-# Run a test container
-podman run -d --name test-checkpoint --network host alpine sleep 1000
+sudo mkdir -p /etc/containers
+sudo tee /etc/containers/containers.conf << 'EOF'
+[engine]
+runtime = "runc"
+cgroup_manager = "cgroupfs"
+EOF
 
-# Create a checkpoint and export it
-podman container checkpoint --export=/tmp/checkpoint.tar.gz test-checkpoint
+# Verify the settings
+podman info --format 'Runtime: {{.Host.OCIRuntime.Path}}, CgroupManager: {{.Host.CgroupManager}}'
+```
 
-# Verify checkpoint file exists
-ls -la /tmp/checkpoint.tar.gz
+### 4. Verify Checkpoint/Restore Works
 
-# Remove the original container
-podman rm test-checkpoint
+```bash
+# Start a test container
+podman run -d --name criu-test --network=host alpine sleep 1000
 
-# Restore from the checkpoint (creates a new container)
-podman container restore --import=/tmp/checkpoint.tar.gz
+# Checkpoint and export
+podman container checkpoint criu-test --export /tmp/criu-test.tar.gz
 
-# Verify it's running
-podman ps
+# Remove original container
+podman rm -f criu-test
+
+# Restore from checkpoint (name is preserved from the checkpoint)
+podman container restore --import /tmp/criu-test.tar.gz
+
+# Verify container is running (should show "Up X seconds")
+podman ps --filter name=criu-test
 
 # Cleanup
-podman rm -f $(podman ps -q)
-rm /tmp/checkpoint.tar.gz
+podman rm -f criu-test
+rm /tmp/criu-test.tar.gz
 ```
+
+## Troubleshooting
+
+### Container exits immediately after restore
+
+If containers exit with code 0 immediately after restore, check the cgroup manager:
+
+```bash
+podman info --format '{{.Host.CgroupManager}}'
+```
+
+If it shows `systemd`, update `/etc/containers/containers.conf` to use `cgroupfs` as shown above.
+
+### CRIU check fails
+
+Run `sudo criu check` to see what's missing. Common issues:
+- Missing kernel configuration options
+- Need root or specific capabilities (CAP_SYS_PTRACE, etc.)
+- SELinux/AppArmor blocking CRIU operations

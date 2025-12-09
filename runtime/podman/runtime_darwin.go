@@ -37,6 +37,10 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 	return nil, fmt.Errorf("podman not supported on macOS")
 }
 
+func (r *Runtime) ReconstructCheckpoint(checkpointPath string, executionID string, env map[string]string, config any, apiHostAddress string) (runtime.Checkpoint, error) {
+	return nil, fmt.Errorf("podman not supported on macOS")
+}
+
 func (r *Runtime) Close() error {
 	return nil
 }

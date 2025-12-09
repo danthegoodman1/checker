@@ -2,16 +2,24 @@ package hypervisor
 
 import (
 	"context"
+	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	goruntime "runtime"
 	"sync"
 	"time"
 
 	"github.com/danthegoodman1/checker/gologger"
 	"github.com/danthegoodman1/checker/http_server"
+	"github.com/danthegoodman1/checker/migrations"
+	"github.com/danthegoodman1/checker/pg"
+	"github.com/danthegoodman1/checker/query"
 	"github.com/danthegoodman1/checker/runtime"
+	"github.com/danthegoodman1/checker/utils"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var logger = gologger.NewLogger()
@@ -38,6 +46,12 @@ type Hypervisor struct {
 	// HTTP Servers
 	callerHTTPServer  *http_server.HTTPServer
 	runtimeHTTPServer *http_server.HTTPServer
+
+	// Database pool for job persistence
+	pool *pgxpool.Pool
+
+	// Wake poller interval
+	wakePollerInterval time.Duration
 }
 
 // Config holds configuration options for creating a Hypervisor.
@@ -50,6 +64,14 @@ type Config struct {
 	// These are passed to the hypervisor so it can start HTTP servers.
 	CallerHTTPAddress  string
 	RuntimeHTTPAddress string
+
+	// Pool is the database connection pool for job persistence.
+	// Required for durable job storage.
+	Pool *pgxpool.Pool
+
+	// WakePollerInterval is how often to poll for suspended jobs to wake.
+	// Defaults to 5 seconds if not set.
+	WakePollerInterval time.Duration
 }
 
 // New creates a new Hypervisor instance.
@@ -62,6 +84,7 @@ func New(cfg Config) *Hypervisor {
 		runners:     make(map[string]*JobRunner),
 		ctx:         ctx,
 		cancel:      cancel,
+		pool:        cfg.Pool,
 	}
 
 	if cfg.IDGenerator != nil {
@@ -72,6 +95,16 @@ func New(cfg Config) *Hypervisor {
 
 	h.callerHTTPAddress = cfg.CallerHTTPAddress
 	h.runtimeHTTPAddress = cfg.RuntimeHTTPAddress
+
+	// Set wake poller interval with default
+	if cfg.WakePollerInterval > 0 {
+		h.wakePollerInterval = cfg.WakePollerInterval
+	} else {
+		h.wakePollerInterval = 5 * time.Second
+	}
+
+	// Run migrations
+	migrations.RunMigrations(utils.PG_DSN)
 
 	h.callerHTTPServer = http_server.StartHTTPServer(h.callerHTTPAddress, "", h.RegisterCallerAPI)
 	h.runtimeHTTPServer = http_server.StartHTTPServer(h.runtimeHTTPAddress, "", h.RegisterRuntimeAPI)
@@ -110,7 +143,7 @@ func (h *Hypervisor) RegisterRuntime(rt runtime.Runtime) error {
 
 // RegisterJobDefinition registers a job definition.
 // Called via caller API
-func (h *Hypervisor) RegisterJobDefinition(jd *JobDefinition) error {
+func (h *Hypervisor) RegisterJobDefinition(ctx context.Context, jd *JobDefinition) error {
 	// Validate that we have a runtime for this job type
 	h.runnersMu.RLock()
 	_, hasRuntime := h.runtimes[jd.RuntimeType]
@@ -120,11 +153,54 @@ func (h *Hypervisor) RegisterJobDefinition(jd *JobDefinition) error {
 		return fmt.Errorf("no runtime registered for type %q", jd.RuntimeType)
 	}
 
+	configJSON, err := json.Marshal(jd.Config)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	var retryPolicyJSON []byte
+	if jd.RetryPolicy != nil {
+		retryPolicyJSON, err = json.Marshal(jd.RetryPolicy)
+		if err != nil {
+			return fmt.Errorf("failed to marshal retry policy: %w", err)
+		}
+	}
+
+	metadataJSON, err := json.Marshal(jd.Metadata)
+	if err != nil {
+		return fmt.Errorf("failed to marshal metadata: %w", err)
+	}
+
+	err = query.ReliableExecInTx(ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		return q.UpsertJobDefinition(ctx, query.UpsertJobDefinitionParams{
+			Name:        jd.Name,
+			Version:     jd.Version,
+			RuntimeType: string(jd.RuntimeType),
+			Config:      configJSON,
+			RetryPolicy: retryPolicyJSON,
+			Metadata:    metadataJSON,
+		})
+	})
+	if err != nil {
+		return fmt.Errorf("failed to persist job definition: %w", err)
+	}
+
 	return h.definitions.Register(jd)
 }
 
 // Called via caller API
-func (h *Hypervisor) UnregisterJobDefinition(name, version string) error {
+func (h *Hypervisor) UnregisterJobDefinition(ctx context.Context, name, version string) error {
+	// Delete from database first
+	err := query.ReliableExecInTx(ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		return q.DeleteJobDefinition(ctx, query.DeleteJobDefinitionParams{
+			Name:    name,
+			Version: version,
+		})
+	})
+	if err != nil {
+		return fmt.Errorf("failed to delete job definition from database: %w", err)
+	}
+
 	return h.definitions.Unregister(name, version)
 }
 
@@ -210,11 +286,44 @@ func (h *Hypervisor) Spawn(ctx context.Context, opts SpawnOptions) (string, erro
 		}
 	}
 
-	runner := NewJobRunner(job, jd, rt, jd.Config, h.runtimeHTTPAddress, opts.Stdout, opts.Stderr)
+	runtimeConfigJSON, err := json.Marshal(jd.Config)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal runtime config: %w", err)
+	}
+
+	envJSON, err := json.Marshal(env)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal env: %w", err)
+	}
+
+	metadataJSON, err := json.Marshal(job.Metadata)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal metadata: %w", err)
+	}
+
+	err = query.ReliableExecInTx(ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		return q.InsertJob(ctx, query.InsertJobParams{
+			ID:                jobID,
+			DefinitionName:    jd.Name,
+			DefinitionVersion: jd.Version,
+			State:             query.JobStatePending,
+			Env:               envJSON,
+			Params:            opts.Params,
+			CreatedAt:         job.CreatedAt,
+			RuntimeType:       string(jd.RuntimeType),
+			RuntimeConfig:     runtimeConfigJSON,
+			Metadata:          metadataJSON,
+		})
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to persist job to database: %w", err)
+	}
+
+	runner := NewJobRunner(job, jd, rt, jd.Config, h.runtimeHTTPAddress, h.pool, opts.Stdout, opts.Stderr)
 
 	// Set up retry callback
 	runner.SetOnFailure(func(r *JobRunner, exitCode int) {
-		job, _ := r.GetState(context.Background())
+		job, _ := r.GetState(r.ctx)
 		maxRetries := 0
 		var retryDelay time.Duration
 		if jd.RetryPolicy != nil {
@@ -244,7 +353,7 @@ func (h *Hypervisor) Spawn(ctx context.Context, opts SpawnOptions) (string, erro
 				Int("exit_code", exitCode).
 				Int("retry_count", job.RetryCount).
 				Msg("job failed, no retries remaining")
-			r.MarkDone()
+			r.MarkFailed()
 		}
 	})
 
@@ -259,20 +368,33 @@ func (h *Hypervisor) Spawn(ctx context.Context, opts SpawnOptions) (string, erro
 		return "", fmt.Errorf("failed to start job: %w", err)
 	}
 
+	// Start a goroutine to evict the job when it completes
+	go func() {
+		<-runner.Done()
+		job, err := runner.GetState(h.ctx)
+		if err != nil {
+			logger.Error().Err(err).Str("job_id", jobID).Msg("failed to get job state for eviction")
+			return
+		}
+		h.maybeEvictJob(jobID, job)
+	}()
+
 	return job.ID, nil
 }
 
 // Called via caller API
 func (h *Hypervisor) GetJob(ctx context.Context, id string) (*Job, error) {
+	// Try memory first
 	h.runnersMu.RLock()
 	runner, exists := h.runners[id]
 	h.runnersMu.RUnlock()
 
-	if !exists {
-		return nil, fmt.Errorf("job %q not found", id)
+	if exists {
+		return runner.GetState(ctx)
 	}
 
-	return runner.GetState(ctx)
+	// Fall back to DB
+	return h.loadJobFromDB(ctx, id)
 }
 
 // Called via caller API
@@ -333,7 +455,15 @@ func (h *Hypervisor) CheckpointJob(ctx context.Context, jobID string, suspendDur
 		return nil, fmt.Errorf("job %q not found", jobID)
 	}
 
-	return runner.Checkpoint(ctx, suspendDuration, token)
+	job, err := runner.Checkpoint(ctx, suspendDuration, token)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if job should be evicted (long sleep duration)
+	h.maybeEvictJob(jobID, job)
+
+	return job, nil
 }
 
 // TakeJobLock takes a checkpoint lock for a job, blocking checkpointing until the lock is released.
@@ -435,22 +565,71 @@ func (h *Hypervisor) GetJobMetadata(ctx context.Context, jobID string) (*JobMeta
 	return meta, nil
 }
 
-// ListJobs returns all active jobs.
-// Called via caller API
-func (h *Hypervisor) ListJobs(ctx context.Context) ([]*Job, error) {
-	h.runnersMu.RLock()
-	defer h.runnersMu.RUnlock()
+// listJobsCursor is the cursor structure for keyset pagination.
+type listJobsCursor struct {
+	CreatedAt time.Time `json:"c"`
+	ID        string    `json:"i"`
+}
 
-	var jobs []*Job
-	for _, runner := range h.runners {
-		job, err := runner.GetState(ctx)
+func encodeListJobsCursor(createdAt time.Time, id string) string {
+	cursor := listJobsCursor{CreatedAt: createdAt, ID: id}
+	data, _ := json.Marshal(cursor)
+	return base64.URLEncoding.EncodeToString(data)
+}
+
+func decodeListJobsCursor(cursor string) (*listJobsCursor, error) {
+	data, err := base64.URLEncoding.DecodeString(cursor)
+	if err != nil {
+		return nil, fmt.Errorf("invalid cursor encoding: %w", err)
+	}
+	var c listJobsCursor
+	if err := json.Unmarshal(data, &c); err != nil {
+		return nil, fmt.Errorf("invalid cursor format: %w", err)
+	}
+	return &c, nil
+}
+
+// ListJobs returns jobs from the database with keyset pagination.
+// Called via caller API
+func (h *Hypervisor) ListJobs(ctx context.Context, limit int32, cursor string) ([]*Job, *string, error) {
+	var params query.ListJobsParams
+	params.Limit = limit
+
+	// Decode cursor if provided
+	if cursor != "" {
+		c, err := decodeListJobsCursor(cursor)
 		if err != nil {
-			continue
+			return nil, nil, fmt.Errorf("invalid cursor: %w", err)
 		}
+		params.CursorCreatedAt = sql.NullTime{Time: c.CreatedAt, Valid: true}
+		params.CursorID = sql.NullString{String: c.ID, Valid: true}
+	}
+
+	var dbJobs []query.Job
+	err := query.ReliableExec(ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		var err error
+		dbJobs, err = q.ListJobs(ctx, params)
+		return err
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to list jobs from database: %w", err)
+	}
+
+	jobs := make([]*Job, 0, len(dbJobs))
+	for _, dbJob := range dbJobs {
+		job := dbJobToJob(dbJob)
 		jobs = append(jobs, job)
 	}
 
-	return jobs, nil
+	// Generate next cursor if we got a full page
+	var nextCursor *string
+	if len(dbJobs) == int(limit) {
+		lastJob := dbJobs[len(dbJobs)-1]
+		encoded := encodeListJobsCursor(lastJob.CreatedAt, lastJob.ID)
+		nextCursor = &encoded
+	}
+
+	return jobs, nextCursor, nil
 }
 
 // Shutdown gracefully shuts down the hypervisor.
@@ -482,5 +661,665 @@ func (h *Hypervisor) Shutdown(ctx context.Context) error {
 		}
 	}
 
+	return nil
+}
+
+// DevCrash forcibly closes the hypervisor without graceful shutdown.
+// This simulates a crash scenario for testing - it releases ports immediately
+// but doesn't wait for jobs to complete or clean up properly.
+func (h *Hypervisor) DevCrash() {
+	h.cancel()
+
+	// Cancel all runner contexts to stop any pending timers (e.g., scheduleSuspendWake)
+	h.runnersMu.RLock()
+	for _, runner := range h.runners {
+		runner.Cancel()
+	}
+	h.runnersMu.RUnlock()
+
+	h.callerHTTPServer.Close()
+	h.runtimeHTTPServer.Close()
+}
+
+// maybeEvictJob evicts a job from memory if it's in a terminal state or sleeping for more than 10 seconds.
+// This is safe because the DB is the source of truth - jobs can be reloaded when needed.
+func (h *Hypervisor) maybeEvictJob(jobID string, job *Job) {
+	if job.IsTerminal() {
+		// Evict terminal jobs immediately (DB is source of truth)
+		h.runnersMu.Lock()
+		delete(h.runners, jobID)
+		h.runnersMu.Unlock()
+		logger.Debug().Str("job_id", jobID).Str("state", string(job.State)).Msg("evicted terminal job from memory")
+		return
+	}
+
+	if job.State == JobStateSuspended && job.SuspendUntil != nil {
+		if time.Until(*job.SuspendUntil) > 10*time.Second {
+			// Evict long-sleeping jobs - the wake poller will reload them
+			h.runnersMu.Lock()
+			delete(h.runners, jobID)
+			h.runnersMu.Unlock()
+			logger.Debug().
+				Str("job_id", jobID).
+				Time("suspend_until", *job.SuspendUntil).
+				Msg("evicted long-sleeping job from memory")
+		}
+	}
+}
+
+// loadJobFromDB loads a job from the database by ID.
+func (h *Hypervisor) loadJobFromDB(ctx context.Context, id string) (*Job, error) {
+	var dbJob query.Job
+	err := query.ReliableExec(ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		var err error
+		dbJob, err = q.GetJob(ctx, id)
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("job %q not found", id)
+	}
+
+	return dbJobToJob(dbJob), nil
+}
+
+// dbJobToJob converts a database job record to a Job struct.
+func dbJobToJob(dbJob query.Job) *Job {
+	job := &Job{
+		ID:                dbJob.ID,
+		DefinitionName:    dbJob.DefinitionName,
+		DefinitionVersion: dbJob.DefinitionVersion,
+		State:             JobState(dbJob.State),
+		CreatedAt:         dbJob.CreatedAt,
+		CheckpointCount:   int(dbJob.CheckpointCount),
+		RetryCount:        int(dbJob.RetryCount),
+	}
+
+	// Parse env from JSON
+	if len(dbJob.Env) > 0 {
+		var env map[string]string
+		if err := json.Unmarshal(dbJob.Env, &env); err == nil {
+			job.Env = env
+		}
+	}
+
+	if len(dbJob.Params) > 0 {
+		job.Params = dbJob.Params
+	}
+
+	if len(dbJob.Metadata) > 0 {
+		var metadata map[string]string
+		if err := json.Unmarshal(dbJob.Metadata, &metadata); err == nil {
+			job.Metadata = metadata
+		}
+	}
+
+	if dbJob.StartedAt.Valid {
+		job.StartedAt = &dbJob.StartedAt.Time
+	}
+	if dbJob.CompletedAt.Valid {
+		job.CompletedAt = &dbJob.CompletedAt.Time
+	}
+	if dbJob.LastCheckpointAt.Valid {
+		job.LastCheckpointAt = &dbJob.LastCheckpointAt.Time
+	}
+	if dbJob.SuspendUntil.Valid {
+		job.SuspendUntil = &dbJob.SuspendUntil.Time
+	}
+
+	if dbJob.Error.Valid {
+		job.Error = dbJob.Error.String
+	}
+
+	if dbJob.ResultExitCode.Valid {
+		job.Result = &JobResult{
+			ExitCode: int(dbJob.ResultExitCode.Int32),
+		}
+		if len(dbJob.ResultOutput) > 0 {
+			job.Result.Output = dbJob.ResultOutput
+		}
+	}
+
+	return job
+}
+
+// RecoverState recovers job definitions and jobs from the database.
+// This should be called after all runtimes have been registered.
+func (h *Hypervisor) RecoverState(ctx context.Context) error {
+	// Recover job definitions first
+	if err := h.recoverJobDefinitions(ctx); err != nil {
+		return fmt.Errorf("failed to recover job definitions: %w", err)
+	}
+
+	// Recover jobs
+	if err := h.recoverJobs(ctx); err != nil {
+		return fmt.Errorf("failed to recover jobs: %w", err)
+	}
+
+	// Start the wake poller for suspended jobs
+	h.startWakePoller()
+
+	return nil
+}
+
+// recoverJobs recovers non-terminal jobs from the database.
+func (h *Hypervisor) recoverJobs(ctx context.Context) error {
+	var dbJobs []query.Job
+	err := query.ReliableExec(ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		var err error
+		dbJobs, err = q.GetNonTerminalJobs(ctx)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("failed to get non-terminal jobs from database: %w", err)
+	}
+
+	logger.Info().Int("count", len(dbJobs)).Msg("recovering non-terminal jobs")
+
+	for _, dbJob := range dbJobs {
+		switch query.JobState(dbJob.State) {
+		case query.JobStateRunning:
+			// Job was running when we crashed - mark as failed and potentially retry
+			if err := h.recoverRunningJob(ctx, dbJob); err != nil {
+				logger.Error().
+					Err(err).
+					Str("job_id", dbJob.ID).
+					Msg("failed to recover running job")
+			}
+
+		case query.JobStateSuspended:
+			// For crash recovery, let the wake poller handle all suspended jobs.
+			logger.Info().
+				Str("job_id", dbJob.ID).
+				Time("suspend_until", dbJob.SuspendUntil.Time).
+				Msg("suspended job will be handled by wake poller")
+
+		case query.JobStatePending:
+			// Job was pending - restart it
+			if err := h.restartPendingJob(ctx, dbJob); err != nil {
+				logger.Error().
+					Err(err).
+					Str("job_id", dbJob.ID).
+					Msg("failed to restart pending job")
+			}
+		}
+	}
+
+	return nil
+}
+
+// recoverRunningJob handles a job that was in the 'running' state when we crashed.
+// According to the plan, we mark it as failed and auto-retry based on the retry policy.
+func (h *Hypervisor) recoverRunningJob(ctx context.Context, dbJob query.Job) error {
+	logger.Info().Str("job_id", dbJob.ID).Msg("recovering running job (was interrupted)")
+
+	// Get the job definition to check retry policy
+	jd, err := h.definitions.Get(dbJob.DefinitionName, dbJob.DefinitionVersion)
+	if err != nil {
+		// No definition - just mark as failed
+		return h.markJobAsFailed(ctx, dbJob.ID, "interrupted: job definition not found")
+	}
+
+	// Check if we should retry
+	maxRetries := 0
+	if jd.RetryPolicy != nil {
+		maxRetries = jd.RetryPolicy.MaxRetries
+	}
+
+	if int(dbJob.RetryCount) < maxRetries {
+		// Retry the job
+		logger.Info().
+			Str("job_id", dbJob.ID).
+			Int("retry_count", int(dbJob.RetryCount)+1).
+			Int("max_retries", maxRetries).
+			Msg("auto-retrying interrupted job")
+		return h.restartPendingJob(ctx, dbJob)
+	}
+
+	// No retries left - mark as failed
+	return h.markJobAsFailed(ctx, dbJob.ID, "interrupted: no retries remaining")
+}
+
+// restartPendingJob restarts a pending job.
+func (h *Hypervisor) restartPendingJob(ctx context.Context, dbJob query.Job) error {
+	logger.Info().Str("job_id", dbJob.ID).Msg("restarting pending job")
+
+	jd, err := h.definitions.Get(dbJob.DefinitionName, dbJob.DefinitionVersion)
+	if err != nil {
+		return h.markJobAsFailed(ctx, dbJob.ID, fmt.Sprintf("job definition not found: %v", err))
+	}
+
+	h.runnersMu.RLock()
+	rt, exists := h.runtimes[jd.RuntimeType]
+	h.runnersMu.RUnlock()
+	if !exists {
+		return h.markJobAsFailed(ctx, dbJob.ID, fmt.Sprintf("runtime %q not found", jd.RuntimeType))
+	}
+
+	job := dbJobToJob(dbJob)
+
+	runner := NewJobRunner(job, jd, rt, jd.Config, h.runtimeHTTPAddress, h.pool, nil, nil)
+
+	runner.SetOnFailure(func(r *JobRunner, exitCode int) {
+		job, _ := r.GetState(r.ctx)
+		maxRetries := 0
+		var retryDelay time.Duration
+		if jd.RetryPolicy != nil {
+			maxRetries = jd.RetryPolicy.MaxRetries
+			if jd.RetryPolicy.RetryDelay != "" {
+				retryDelay, _ = time.ParseDuration(jd.RetryPolicy.RetryDelay)
+			}
+		}
+
+		if job.RetryCount < maxRetries {
+			r.logger.Debug().
+				Int("exit_code", exitCode).
+				Int("retry_count", job.RetryCount+1).
+				Int("max_retries", maxRetries).
+				Dur("retry_delay", retryDelay).
+				Msg("retrying failed job")
+
+			if retryDelay > 0 {
+				time.Sleep(retryDelay)
+			}
+			if err := r.Retry(); err != nil {
+				r.logger.Error().Err(err).Msg("failed to retry job")
+				r.MarkDone()
+			}
+		} else {
+			r.logger.Debug().
+				Int("exit_code", exitCode).
+				Int("retry_count", job.RetryCount).
+				Msg("job failed, no retries remaining")
+			r.MarkFailed()
+		}
+	})
+
+	h.runnersMu.Lock()
+	h.runners[dbJob.ID] = runner
+	h.runnersMu.Unlock()
+
+	if err := runner.Start(); err != nil {
+		h.runnersMu.Lock()
+		delete(h.runners, dbJob.ID)
+		h.runnersMu.Unlock()
+		return fmt.Errorf("failed to start job: %w", err)
+	}
+
+	// Start eviction goroutine
+	go func() {
+		<-runner.Done()
+		job, err := runner.GetState(h.ctx)
+		if err != nil {
+			return
+		}
+		h.maybeEvictJob(dbJob.ID, job)
+	}()
+
+	return nil
+}
+
+// scheduleJobWake loads a suspended job into memory and schedules its wake.
+func (h *Hypervisor) scheduleJobWake(ctx context.Context, dbJob query.Job) error {
+	logger.Info().
+		Str("job_id", dbJob.ID).
+		Time("suspend_until", dbJob.SuspendUntil.Time).
+		Msg("scheduling job wake")
+
+	jd, err := h.definitions.Get(dbJob.DefinitionName, dbJob.DefinitionVersion)
+	if err != nil {
+		return fmt.Errorf("job definition not found: %w", err)
+	}
+
+	h.runnersMu.RLock()
+	rt, exists := h.runtimes[jd.RuntimeType]
+	h.runnersMu.RUnlock()
+	if !exists {
+		return fmt.Errorf("runtime %q not found", jd.RuntimeType)
+	}
+
+	job := dbJobToJob(dbJob)
+
+	if !dbJob.CheckpointPath.Valid || dbJob.CheckpointPath.String == "" {
+		return fmt.Errorf("no checkpoint path for suspended job")
+	}
+
+	checkpoint, err := rt.ReconstructCheckpoint(
+		dbJob.CheckpointPath.String,
+		dbJob.ID,
+		job.Env,
+		jd.Config,
+		h.runtimeHTTPAddress,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to reconstruct checkpoint: %w", err)
+	}
+
+	runner := NewJobRunner(job, jd, rt, jd.Config, h.runtimeHTTPAddress, h.pool, nil, nil)
+	runner.checkpoint = checkpoint
+
+	runner.SetOnFailure(func(r *JobRunner, exitCode int) {
+		job, _ := r.GetState(r.ctx)
+		maxRetries := 0
+		var retryDelay time.Duration
+		if jd.RetryPolicy != nil {
+			maxRetries = jd.RetryPolicy.MaxRetries
+			if jd.RetryPolicy.RetryDelay != "" {
+				retryDelay, _ = time.ParseDuration(jd.RetryPolicy.RetryDelay)
+			}
+		}
+
+		if job.RetryCount < maxRetries {
+			if retryDelay > 0 {
+				time.Sleep(retryDelay)
+			}
+			if err := r.Retry(); err != nil {
+				r.logger.Error().Err(err).Msg("failed to retry job")
+				r.MarkDone()
+			}
+		} else {
+			r.logger.Debug().
+				Int("exit_code", exitCode).
+				Int("retry_count", job.RetryCount).
+				Msg("job failed, no retries remaining")
+			r.MarkFailed()
+		}
+	})
+
+	h.runnersMu.Lock()
+	h.runners[dbJob.ID] = runner
+	h.runnersMu.Unlock()
+
+	runner.scheduleSuspendWake(dbJob.SuspendUntil.Time)
+
+	return nil
+}
+
+// markJobAsFailed marks a job as failed in the database.
+func (h *Hypervisor) markJobAsFailed(ctx context.Context, jobID string, errorMsg string) error {
+	now := time.Now()
+	return query.ReliableExecInTx(ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		return q.UpdateJobCompleted(ctx, query.UpdateJobCompletedParams{
+			ID:          jobID,
+			State:       query.JobStateFailed,
+			CompletedAt: utils.SQLNullTime(now),
+			Error:       utils.SQLNullString(errorMsg),
+		})
+	})
+}
+
+// recoverJobDefinitions loads job definitions from the database and registers them.
+func (h *Hypervisor) recoverJobDefinitions(ctx context.Context) error {
+	var dbDefs []query.JobDefinition
+	err := query.ReliableExec(ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		var err error
+		dbDefs, err = q.ListJobDefinitions(ctx)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list job definitions from database: %w", err)
+	}
+
+	for _, dbDef := range dbDefs {
+		// Check if we have a runtime for this definition
+		rtType := runtime.RuntimeType(dbDef.RuntimeType)
+		h.runnersMu.RLock()
+		rt, hasRuntime := h.runtimes[rtType]
+		h.runnersMu.RUnlock()
+
+		if !hasRuntime {
+			logger.Warn().
+				Str("name", dbDef.Name).
+				Str("version", dbDef.Version).
+				Str("runtime_type", dbDef.RuntimeType).
+				Msg("skipping job definition recovery: runtime not registered")
+			continue
+		}
+
+		config, err := rt.ParseConfig(dbDef.Config)
+		if err != nil {
+			logger.Error().
+				Err(err).
+				Str("name", dbDef.Name).
+				Str("version", dbDef.Version).
+				Msg("failed to parse job definition config")
+			continue
+		}
+
+		var retryPolicy *RetryPolicy
+		if len(dbDef.RetryPolicy) > 0 {
+			retryPolicy = &RetryPolicy{}
+			if err := json.Unmarshal(dbDef.RetryPolicy, retryPolicy); err != nil {
+				logger.Error().
+					Err(err).
+					Str("name", dbDef.Name).
+					Str("version", dbDef.Version).
+					Msg("failed to parse job definition retry policy")
+				continue
+			}
+		}
+
+		var metadata map[string]string
+		if len(dbDef.Metadata) > 0 {
+			if err := json.Unmarshal(dbDef.Metadata, &metadata); err != nil {
+				logger.Error().
+					Err(err).
+					Str("name", dbDef.Name).
+					Str("version", dbDef.Version).
+					Msg("failed to parse job definition metadata")
+				continue
+			}
+		}
+
+		jd := &JobDefinition{
+			Name:        dbDef.Name,
+			Version:     dbDef.Version,
+			RuntimeType: rtType,
+			Config:      config,
+			RetryPolicy: retryPolicy,
+			Metadata:    metadata,
+		}
+		if err := h.definitions.Register(jd); err != nil {
+			logger.Error().
+				Err(err).
+				Str("name", dbDef.Name).
+				Str("version", dbDef.Version).
+				Msg("failed to register recovered job definition")
+			continue
+		}
+
+		logger.Info().
+			Str("name", dbDef.Name).
+			Str("version", dbDef.Version).
+			Msg("recovered job definition from database")
+	}
+
+	return nil
+}
+
+// startWakePoller starts a background goroutine that polls for suspended jobs to wake.
+func (h *Hypervisor) startWakePoller() {
+	ticker := time.NewTicker(h.wakePollerInterval)
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				h.wakeReadyJobs()
+			case <-h.ctx.Done():
+				ticker.Stop()
+				return
+			}
+		}
+	}()
+	logger.Info().Msg("started wake poller")
+}
+
+// wakeReadyJobs queries for suspended jobs that are ready to wake and restores them.
+func (h *Hypervisor) wakeReadyJobs() {
+	var dbJobs []query.Job
+	err := query.ReliableExec(h.ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		var err error
+		dbJobs, err = q.GetSuspendedJobsToWake(ctx, query.GetSuspendedJobsToWakeParams{
+			SuspendUntil: utils.SQLNullTime(time.Now()),
+			Limit:        100, // Process in batches
+		})
+		return err
+	})
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to query suspended jobs to wake")
+		return
+	}
+
+	for _, dbJob := range dbJobs {
+		h.runnersMu.RLock()
+		_, exists := h.runners[dbJob.ID]
+		h.runnersMu.RUnlock()
+		if exists {
+			// Already being handled in memory
+			continue
+		}
+
+		if err := h.wakeJob(h.ctx, dbJob); err != nil {
+			logger.Error().
+				Err(err).
+				Str("job_id", dbJob.ID).
+				Msg("failed to wake suspended job")
+		}
+	}
+}
+
+// wakeJob restores a suspended job from its checkpoint.
+func (h *Hypervisor) wakeJob(ctx context.Context, dbJob query.Job) error {
+	logger.Info().Str("job_id", dbJob.ID).Msg("waking suspended job")
+
+	jd, err := h.definitions.Get(dbJob.DefinitionName, dbJob.DefinitionVersion)
+	if err != nil {
+		return fmt.Errorf("failed to get job definition: %w", err)
+	}
+
+	h.runnersMu.RLock()
+	rt, exists := h.runtimes[jd.RuntimeType]
+	h.runnersMu.RUnlock()
+	if !exists {
+		return fmt.Errorf("runtime %q not found", jd.RuntimeType)
+	}
+
+	job := dbJobToJob(dbJob)
+
+	if !dbJob.CheckpointPath.Valid || dbJob.CheckpointPath.String == "" {
+		return fmt.Errorf("no checkpoint path for suspended job")
+	}
+
+	// Verify checkpoint file exists before attempting restore
+	checkpointPath := dbJob.CheckpointPath.String
+	if fileInfo, statErr := os.Stat(checkpointPath); statErr != nil {
+		logger.Error().
+			Err(statErr).
+			Str("checkpoint_path", checkpointPath).
+			Str("job_id", dbJob.ID).
+			Msg("checkpoint file does not exist")
+		return fmt.Errorf("checkpoint file does not exist at %s: %w", checkpointPath, statErr)
+	} else {
+		logger.Info().
+			Str("checkpoint_path", checkpointPath).
+			Str("job_id", dbJob.ID).
+			Int64("file_size", fileInfo.Size()).
+			Msg("checkpoint file verified")
+	}
+
+	checkpoint, err := rt.ReconstructCheckpoint(
+		dbJob.CheckpointPath.String,
+		dbJob.ID,
+		job.Env,
+		jd.Config,
+		h.runtimeHTTPAddress,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to reconstruct checkpoint: %w", err)
+	}
+
+	runner := NewJobRunner(job, jd, rt, jd.Config, h.runtimeHTTPAddress, h.pool, nil, nil)
+	runner.checkpoint = checkpoint
+
+	runner.SetOnFailure(func(r *JobRunner, exitCode int) {
+		job, _ := r.GetState(r.ctx)
+		maxRetries := 0
+		var retryDelay time.Duration
+		if jd.RetryPolicy != nil {
+			maxRetries = jd.RetryPolicy.MaxRetries
+			if jd.RetryPolicy.RetryDelay != "" {
+				retryDelay, _ = time.ParseDuration(jd.RetryPolicy.RetryDelay)
+			}
+		}
+
+		if job.RetryCount < maxRetries {
+			r.logger.Debug().
+				Int("exit_code", exitCode).
+				Int("retry_count", job.RetryCount+1).
+				Int("max_retries", maxRetries).
+				Dur("retry_delay", retryDelay).
+				Msg("retrying failed job")
+
+			if retryDelay > 0 {
+				time.Sleep(retryDelay)
+			}
+			if err := r.Retry(); err != nil {
+				r.logger.Error().Err(err).Msg("failed to retry job")
+				r.MarkDone()
+			}
+		} else {
+			r.logger.Debug().
+				Int("exit_code", exitCode).
+				Int("retry_count", job.RetryCount).
+				Msg("job failed, no retries remaining")
+			r.MarkFailed()
+		}
+	})
+
+	// Add to runners map BEFORE restore so that checkpoint requests from the
+	// restored container can find the runner. The Checkpoint method will wait
+	// for process to be set via the processReady channel.
+	h.runnersMu.Lock()
+	h.runners[dbJob.ID] = runner
+	h.runnersMu.Unlock()
+
+	process, err := rt.Restore(ctx, runtime.RestoreOptions{
+		Checkpoint: checkpoint,
+		Stdout:     os.Stdout, // TODO: Support stdout/stderr for restored jobs
+		Stderr:     os.Stderr,
+	})
+	if err != nil {
+		// Cancel runner context to unblock any pending checkpoint requests
+		runner.Cancel()
+
+		h.runnersMu.Lock()
+		delete(h.runners, dbJob.ID)
+		h.runnersMu.Unlock()
+
+		runner.persistJobCompleted(query.JobStateFailed, utils.Ptr(time.Now()), nil, fmt.Sprintf("failed to restore: %v", err))
+		return fmt.Errorf("failed to restore from checkpoint: %w", err)
+	}
+
+	runner.process = process
+	runner.signalProcessReady()
+
+	runner.jobMu.Lock()
+	runner.job.State = JobStateRunning
+	runner.job.SuspendUntil = nil
+	runner.jobMu.Unlock()
+	runner.persistJobState(query.JobStateRunning)
+
+	go runner.waitForExit()
+
+	go func() {
+		<-runner.Done()
+		job, err := runner.GetState(h.ctx)
+		if err != nil {
+			logger.Error().Err(err).Str("job_id", dbJob.ID).Msg("failed to get job state for eviction")
+			return
+		}
+		h.maybeEvictJob(dbJob.ID, job)
+	}()
+
+	logger.Info().Str("job_id", dbJob.ID).Msg("successfully woke suspended job")
 	return nil
 }

@@ -40,6 +40,10 @@ func (c *podmanCheckpoint) String() string {
 	return fmt.Sprintf("podman-checkpoint[exec=%s,export=%s]", c.executionID, c.exportPath)
 }
 
+func (c *podmanCheckpoint) Path() string {
+	return c.exportPath
+}
+
 func (c *podmanCheckpoint) GracePeriodMs() int64 {
 	return 100
 }
@@ -102,12 +106,16 @@ func (h *processHandle) Checkpoint(ctx context.Context, keepRunning bool) (runti
 		if h.logCancel != nil {
 			h.logCancel()
 		}
-		rmCmd := exec.CommandContext(ctx, "podman", "rm", "-f", h.containerID)
+		// Use --volumes to also clean up any associated storage
+		rmCmd := exec.CommandContext(ctx, "podman", "rm", "-f", "--volumes", h.containerID)
 		if rmErr := rmCmd.Run(); rmErr != nil {
 			h.logger.Warn().Err(rmErr).Msg("failed to remove container after checkpoint")
 		} else {
 			h.logger.Debug().Msg("removed container after checkpoint")
 		}
+		// Also run container cleanup to ensure storage is fully released
+		cleanupCmd := exec.CommandContext(ctx, "podman", "container", "cleanup", h.containerID)
+		_ = cleanupCmd.Run() // Ignore errors - container might already be cleaned up
 	}
 
 	return &podmanCheckpoint{
@@ -143,8 +151,17 @@ func (h *processHandle) Kill(ctx context.Context) error {
 }
 
 func (h *processHandle) Wait(ctx context.Context) (int, error) {
+	h.logger.Debug().Msg("waiting for container to exit")
+
 	cmd := exec.CommandContext(ctx, "podman", "wait", h.containerID)
 	output, err := cmd.Output()
+
+	h.logger.Debug().
+		Err(err).
+		Str("output", string(output)).
+		Bool("ctx_done", ctx.Err() != nil).
+		Msg("podman wait returned")
+
 	if err != nil {
 		return -1, fmt.Errorf("failed to wait for container: %w", err)
 	}
@@ -153,6 +170,7 @@ func (h *processHandle) Wait(ctx context.Context) (int, error) {
 	if _, err := fmt.Sscanf(strings.TrimSpace(string(output)), "%d", &exitCode); err != nil {
 		return -1, fmt.Errorf("failed to parse exit code: %w", err)
 	}
+	h.logger.Debug().Int("exit_code", exitCode).Msg("container exited")
 	return exitCode, nil
 }
 
@@ -238,17 +256,63 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 		Str("export_path", c.exportPath).
 		Msg("restoring container from checkpoint")
 
+	// Clean up any existing container with the same name before restoring.
+	// This handles crash recovery where the old container (stopped after checkpoint) still exists,
+	// or normal wake where we want a clean slate.
+	containerName := fmt.Sprintf("checker-%s", c.executionID)
+
+	// First, try to cleanup any container state (storage, network, etc.)
+	cleanupStateCmd := exec.CommandContext(ctx, "podman", "container", "cleanup", containerName)
+	if cleanupOutput, cleanupErr := cleanupStateCmd.CombinedOutput(); cleanupErr != nil {
+		r.logger.Debug().
+			Err(cleanupErr).
+			Str("output", string(cleanupOutput)).
+			Str("container_name", containerName).
+			Msg("container cleanup failed (may not exist or already clean)")
+	}
+
+	// Then remove the container with --volumes to clean up any associated storage
+	cleanupCmd := exec.CommandContext(ctx, "podman", "rm", "-f", "--ignore", "--volumes", containerName)
+	if cleanupOutput, cleanupErr := cleanupCmd.CombinedOutput(); cleanupErr != nil {
+		// Log but don't fail - container might not exist
+		r.logger.Debug().
+			Err(cleanupErr).
+			Str("output", string(cleanupOutput)).
+			Str("container_name", containerName).
+			Msg("container rm failed (may not exist)")
+	}
+
+	// Also prune any stopped containers to clean up storage that might conflict with restore
+	pruneCmd := exec.CommandContext(ctx, "podman", "container", "prune", "-f")
+	if pruneOutput, pruneErr := pruneCmd.CombinedOutput(); pruneErr != nil {
+		r.logger.Debug().
+			Err(pruneErr).
+			Str("output", string(pruneOutput)).
+			Msg("container prune failed (may be nothing to prune)")
+	}
+
 	// Restore from exported checkpoint file
 	cmd := exec.CommandContext(ctx, "podman", "container", "restore",
 		"--import", c.exportPath,
 		"--tcp-established",
 	)
 	output, err := cmd.CombinedOutput()
+
+	r.logger.Info().
+		Str("restore_output", string(output)).
+		Str("checkpoint_path", c.exportPath).
+		Bool("error", err != nil).
+		Msg("podman restore completed")
+
 	if err != nil {
+		// If restore failed, clean up any container that might have been created.
+		// The container name is deterministic, so we can clean it up even if we don't have the ID.
+		cleanupAfterFailCmd := exec.CommandContext(ctx, "podman", "rm", "-f", "--ignore", containerName)
+		_ = cleanupAfterFailCmd.Run()
 		return nil, fmt.Errorf("failed to restore container from checkpoint: %w, output: %s", err, string(output))
 	}
 
-	// The output contains the new container ID
+	// The output contains the container ID
 	containerID := strings.TrimSpace(string(output))
 
 	logger := r.logger.With().
@@ -264,7 +328,7 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 	// Start log streaming if writers are provided
 	var logCancel context.CancelFunc
 	if opts.Stdout != nil || opts.Stderr != nil {
-		logCancel = r.streamLogs(containerID, opts.Stdout, opts.Stderr, logger)
+		logCancel = r.streamLogs(ctx, containerID, opts.Stdout, opts.Stderr, logger)
 	}
 
 	return &processHandle{
@@ -363,7 +427,7 @@ func (r *Runtime) startContainer(ctx context.Context, executionID string, env ma
 	// Start log streaming if writers are provided
 	var logCancel context.CancelFunc
 	if stdout != nil || stderr != nil {
-		logCancel = r.streamLogs(containerID, stdout, stderr, logger)
+		logCancel = r.streamLogs(ctx, containerID, stdout, stderr, logger)
 	}
 
 	return &processHandle{
@@ -381,8 +445,8 @@ func (r *Runtime) startContainer(ctx context.Context, executionID string, env ma
 
 // streamLogs fetches container logs and writes them to the provided writers.
 // Returns a cancel function to stop log streaming.
-func (r *Runtime) streamLogs(containerID string, stdout, stderr io.Writer, logger zerolog.Logger) context.CancelFunc {
-	ctx, cancel := context.WithCancel(context.Background())
+func (r *Runtime) streamLogs(parentCtx context.Context, containerID string, stdout, stderr io.Writer, logger zerolog.Logger) context.CancelFunc {
+	ctx, cancel := context.WithCancel(parentCtx)
 
 	go func() {
 		cmd := exec.CommandContext(ctx, "podman", "logs", "-f", containerID)
@@ -406,6 +470,22 @@ func (r *Runtime) streamLogs(containerID string, stdout, stderr io.Writer, logge
 // Close is a no-op for CLI-based runtime.
 func (r *Runtime) Close() error {
 	return nil
+}
+
+// ReconstructCheckpoint rebuilds a Checkpoint from persisted data.
+func (r *Runtime) ReconstructCheckpoint(checkpointPath string, executionID string, env map[string]string, config any, apiHostAddress string) (runtime.Checkpoint, error) {
+	cfg, ok := config.(*Config)
+	if !ok {
+		return nil, fmt.Errorf("invalid config type: expected *podman.Config, got %T", config)
+	}
+
+	return &podmanCheckpoint{
+		executionID:    executionID,
+		exportPath:     checkpointPath,
+		env:            env,
+		config:         cfg,
+		apiHostAddress: apiHostAddress,
+	}, nil
 }
 
 // Ensure Runtime implements runtime.Runtime

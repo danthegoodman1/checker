@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres
+    environment:
+      POSTGRES_USER: checker
+      POSTGRES_PASSWORD: checker
+      POSTGRES_DB: checker
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+
+volumes:
+  postgres_data:

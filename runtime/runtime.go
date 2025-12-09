@@ -5,11 +5,10 @@ import (
 	"io"
 )
 
-// RuntimeType identifies the type of runtime (nodejs, docker, firecracker, etc.)
+// RuntimeType identifies the type of runtime (podman, firecracker, etc.)
 type RuntimeType string
 
 const (
-	RuntimeTypeNodeJS RuntimeType = "nodejs"
 	RuntimeTypePodman RuntimeType = "podman"
 	// Future runtime types:
 	// RuntimeTypeFirecracker RuntimeType = "firecracker"
@@ -21,6 +20,10 @@ const (
 type Checkpoint interface {
 	// String returns a human-readable identifier for logging/debugging
 	String() string
+
+	// Path returns the filesystem path to the checkpoint file/directory.
+	// This is what gets persisted to the database for recovery.
+	Path() string
 
 	// GracePeriodMs returns the time in milliseconds that the worker should wait
 	// after receiving the checkpoint response before the runtime will stop the process.
@@ -62,7 +65,7 @@ type StartOptions struct {
 	// These are user/job-defined variables, not internal runtime config.
 	Env map[string]string
 
-	// Config is runtime-specific configuration (e.g., *nodejs.Config, *docker.Config).
+	// Config is runtime-specific configuration (e.g., *podman.Config).
 	Config any
 
 	// APIHostAddress is the host:port where the runtime API is listening.
@@ -90,7 +93,7 @@ type RestoreOptions struct {
 }
 
 // Runtime is a factory that creates Process instances.
-// Each runtime type (NodeJS, Docker, etc.) implements this interface, with
+// Each runtime type (Podman, Firecracker, etc.) implements this interface, with
 // platform-specific implementations (Linux with CRIU, macOS with no-ops, etc.)
 type Runtime interface {
 	// Type returns the runtime type this implementation handles
@@ -106,6 +109,10 @@ type Runtime interface {
 	// Restore resumes an execution from a checkpoint.
 	// Returns a new Process representing the restored execution.
 	Restore(ctx context.Context, opts RestoreOptions) (Process, error)
+
+	// ReconstructCheckpoint rebuilds a Checkpoint from persisted data.
+	// This is used to restore suspended jobs from the database.
+	ReconstructCheckpoint(checkpointPath string, executionID string, env map[string]string, config any, apiHostAddress string) (Checkpoint, error)
 
 	// CheckpointGracePeriodMs returns the grace period in milliseconds that workers
 	// should wait after receiving a checkpoint response before the runtime stops the process.

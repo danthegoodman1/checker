@@ -1,23 +1,14 @@
 // Test worker for checkpoint/restore functionality
-// Uses time-based logic to checkpoint with suspend on first run,
-// then skip checkpoint after restore (to avoid infinite loops on macOS).
-//
-// On Linux with real CRIU: in-memory state is preserved across checkpoint/restore,
-// so preCheckpointRuns will be 1 (code before checkpoint runs only once).
-// On macOS (workaround): container restarts from scratch, so preCheckpointRuns
-// will be 2 (code before checkpoint runs twice - once per container start).
+// With CRIU on Linux, execution continues from where it left off after restore,
+// so step 1 runs once, checkpoint suspends, then step 2 runs after restore.
 
 const jobId = process.env.CHECKER_JOB_ID || "unknown"
 const defName = process.env.CHECKER_JOB_DEFINITION_NAME || "unknown"
 const defVersion = process.env.CHECKER_JOB_DEFINITION_VERSION || "unknown"
 const apiUrl = process.env.CHECKER_API_URL
-const spawnedAt = process.env.CHECKER_JOB_SPAWNED_AT
-  ? parseInt(process.env.CHECKER_JOB_SPAWNED_AT, 10)
-  : null
 
 // Track how many times the pre-checkpoint code runs.
 // With real CRIU (Linux), this stays at 1 because state is preserved.
-// With macOS workaround, this becomes 2 because container restarts from scratch.
 let preCheckpointRuns = 0
 
 console.log(
@@ -93,12 +84,15 @@ async function main() {
   console.log("Received params:", JSON.stringify(params))
 
   const inputNumber = params.number ?? 0
-  const checkpointWithinSecs = params.checkpoint_within_secs ?? 3
   const suspendDuration = params.suspend_duration ?? "4s"
+  const skipCheckpoint = params.skip_checkpoint ?? false
+  const sleepMs = params.sleep_ms ?? 0
+  // checkpoint_keep_running: checkpoint without suspending (keep running after checkpoint)
+  const checkpointKeepRunning = params.checkpoint_keep_running ?? false
+  // sleep_after_checkpoint_ms: sleep after checkpoint (useful for testing crash scenarios)
+  const sleepAfterCheckpointMs = params.sleep_after_checkpoint_ms ?? 0
 
-  // Increment pre-checkpoint run counter BEFORE any checkpoint logic.
-  // With real CRIU (Linux), this only runs once because state is restored.
-  // With macOS workaround, this runs twice because container restarts from scratch.
+  // This code runs once before checkpoint
   preCheckpointRuns++
   console.log(`Pre-checkpoint code run count: ${preCheckpointRuns}`)
 
@@ -106,31 +100,33 @@ async function main() {
   const step1Result = { step: 1, value: inputNumber + 1 }
   console.log("Step 1 complete:", step1Result)
 
-  // Time-based checkpoint logic to prevent infinite loops on macOS
-  // (where checkpoint just stops/starts the container without preserving state)
-  // Only checkpoint if within the time window since spawn
-  let checkpointSkipped = false
-  const nowSeconds = Math.floor(Date.now() / 1000)
+  // Optional sleep before checkpoint (useful for testing container kill scenarios)
+  if (sleepMs > 0) {
+    console.log(`Sleeping for ${sleepMs}ms...`)
+    await new Promise((resolve) => setTimeout(resolve, sleepMs))
+  }
 
-  if (spawnedAt === null) {
-    console.log("Warning: CHECKER_JOB_SPAWNED_AT not set, skipping checkpoint")
-    checkpointSkipped = true
-  } else {
-    const cutoffTime = spawnedAt + checkpointWithinSecs
-    if (nowSeconds <= cutoffTime) {
-      console.log(
-        `Time check: now=${nowSeconds}, spawnedAt=${spawnedAt}, cutoff=${cutoffTime} -> checkpointing with suspend`
-      )
+  // Checkpoint - with CRIU, execution continues from here after restore
+  if (!skipCheckpoint) {
+    if (checkpointKeepRunning) {
+      console.log("Checkpointing (keep running)...")
+      // Pass null/undefined for suspend_duration to keep running
+      const checkpointResult = await checkpoint(null)
+      console.log("Checkpoint complete (still running):", JSON.stringify(checkpointResult))
+    } else {
+      console.log("Checkpointing with suspend...")
       const checkpointResult = await checkpoint(suspendDuration)
       console.log("Checkpoint complete:", JSON.stringify(checkpointResult))
-    } else {
-      console.log(
-        `Time check: now=${nowSeconds}, spawnedAt=${spawnedAt}, cutoff=${cutoffTime} -> skipping (restored after cutoff)`
-      )
-      checkpointSkipped = true
     }
   }
 
+  // Optional sleep after checkpoint (for testing: crash while running after checkpoint)
+  if (sleepAfterCheckpointMs > 0) {
+    console.log(`Sleeping for ${sleepAfterCheckpointMs}ms after checkpoint...`)
+    await new Promise((resolve) => setTimeout(resolve, sleepAfterCheckpointMs))
+  }
+
+  // This code runs after restore
   console.log("Step 2: Doubling the value...")
   const step2Result = { step: 2, value: step1Result.value * 2 }
   console.log("Step 2 complete:", step2Result)
@@ -139,7 +135,6 @@ async function main() {
   console.log(`Final pre-checkpoint run count: ${preCheckpointRuns}`)
   await exit(0, {
     result: step2Result,
-    checkpoint_skipped: checkpointSkipped,
     pre_checkpoint_runs: preCheckpointRuns,
   })
 }
