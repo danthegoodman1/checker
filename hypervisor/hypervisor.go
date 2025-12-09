@@ -11,7 +11,9 @@ import (
 
 	"github.com/danthegoodman1/checker/gologger"
 	"github.com/danthegoodman1/checker/http_server"
+	"github.com/danthegoodman1/checker/migrations"
 	"github.com/danthegoodman1/checker/runtime"
+	"github.com/danthegoodman1/checker/utils"
 )
 
 var logger = gologger.NewLogger()
@@ -72,6 +74,9 @@ func New(cfg Config) *Hypervisor {
 
 	h.callerHTTPAddress = cfg.CallerHTTPAddress
 	h.runtimeHTTPAddress = cfg.RuntimeHTTPAddress
+
+	// Run migrations
+	migrations.RunMigrations(utils.PG_DSN)
 
 	h.callerHTTPServer = http_server.StartHTTPServer(h.callerHTTPAddress, "", h.RegisterCallerAPI)
 	h.runtimeHTTPServer = http_server.StartHTTPServer(h.runtimeHTTPAddress, "", h.RegisterRuntimeAPI)

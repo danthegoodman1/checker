@@ -19,8 +19,8 @@ import (
 
 	"github.com/quic-go/quic-go/http3"
 
-	"github.com/danthegoodman1/GoAPITemplate/gologger"
-	"github.com/danthegoodman1/GoAPITemplate/utils"
+	"github.com/danthegoodman1/checker/gologger"
+	"github.com/danthegoodman1/checker/utils"
 	"github.com/go-playground/validator/v10"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"

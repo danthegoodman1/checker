@@ -1,0 +1,13 @@
+---
+alwaysApply: true
+---
+
+The database is configured via a combination of sqlc (for compiling sql queries), sql-migrate (for running migrations and generating final schemas), Taskfiles, and Postgres.
+
+Migrations should go in the `migrations/` directory.
+
+Queries should be defined as SQL queries in the `queries/` folder as `.sql` files, and are used via using the `query.ReliableExecInTxn()` for executing transactions.
+
+To compile the sqlc functions, you must run `task sql-gen` which will materialize the migrations into a final file, and run the sqlc generation. This will make the functions available.
+
+You should defer to the user to run SQL migrations and not do it yourself.
