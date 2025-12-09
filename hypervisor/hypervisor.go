@@ -806,27 +806,11 @@ func (h *Hypervisor) recoverJobs(ctx context.Context) error {
 			}
 
 		case query.JobStateSuspended:
-			// Job was suspended - check if it should wake now or later
-			if dbJob.SuspendUntil.Valid {
-				if time.Now().After(dbJob.SuspendUntil.Time) {
-					// Should wake now
-					if err := h.wakeJob(ctx, dbJob); err != nil {
-						logger.Error().
-							Err(err).
-							Str("job_id", dbJob.ID).
-							Msg("failed to wake suspended job")
-					}
-				} else if time.Until(dbJob.SuspendUntil.Time) <= 10*time.Second {
-					// Wake soon - load into memory and schedule
-					if err := h.scheduleJobWake(ctx, dbJob); err != nil {
-						logger.Error().
-							Err(err).
-							Str("job_id", dbJob.ID).
-							Msg("failed to schedule job wake")
-					}
-				}
-				// Else: wake later - poller will handle it
-			}
+			// For crash recovery, let the wake poller handle all suspended jobs.
+			logger.Info().
+				Str("job_id", dbJob.ID).
+				Time("suspend_until", dbJob.SuspendUntil.Time).
+				Msg("suspended job will be handled by wake poller")
 
 		case query.JobStatePending:
 			// Job was pending - restart it
