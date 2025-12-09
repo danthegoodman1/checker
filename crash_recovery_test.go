@@ -36,7 +36,7 @@ import (
 //
 // Run with: go test -v -run TestCrashRecovery
 // Requires: PG_DSN environment variable and Linux (for Podman)
-func TestCrashRecovery(t *testing.T) {
+func TestCrashRecoveryHypervisor(t *testing.T) {
 	if goruntime.GOOS != "linux" {
 		t.Skip("Crash recovery test requires Linux (Podman)")
 	}
