@@ -182,18 +182,14 @@ func (r *JobRunner) Retry() error {
 
 // restoreFromCheckpoint restores the job from its checkpoint.
 func (r *JobRunner) restoreFromCheckpoint() error {
-	// Create a fresh context for this restore attempt - the old context may have been
-	// affected by the previous process's failure
-	ctx, cancel := context.WithCancel(context.Background())
-	r.ctx = ctx
-	r.cancel = cancel
-
 	r.jobMu.Lock()
 	r.job.State = JobStateRunning
 	r.job.SuspendUntil = nil
 	r.jobMu.Unlock()
 
-	process, err := r.rt.Restore(r.ctx, runtime.RestoreOptions{
+	// Use background context for restore - the runner's context may have been affected
+	// by the previous process's failure or cleanup
+	process, err := r.rt.Restore(context.Background(), runtime.RestoreOptions{
 		Checkpoint: r.checkpoint,
 		Stdout:     r.stdout,
 		Stderr:     r.stderr,
@@ -212,9 +208,11 @@ func (r *JobRunner) restoreFromCheckpoint() error {
 	r.process = process
 	r.logger.Debug().Msg("job restored from checkpoint")
 
-	// Persist running state
+	// Persist running state with a timeout context (not r.ctx which may be cancelled)
 	now := time.Now()
-	if dbErr := query.ReliableExec(r.ctx, r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+	dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer dbCancel()
+	if dbErr := query.ReliableExec(dbCtx, r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 		return q.UpdateJobStarted(ctx, query.UpdateJobStartedParams{
 			ID:        r.job.ID,
 			StartedAt: sql.NullTime{Time: now, Valid: true},
