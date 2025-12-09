@@ -273,7 +273,6 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 	cmd := exec.CommandContext(ctx, "podman", "container", "restore",
 		"--import", c.exportPath,
 		"--tcp-established",
-		"--print-stats",
 	)
 	output, err := cmd.CombinedOutput()
 
@@ -291,9 +290,8 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 		return nil, fmt.Errorf("failed to restore container from checkpoint: %w, output: %s", err, string(output))
 	}
 
-	// The output now contains stats JSON followed by container ID on last line
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	containerID := lines[len(lines)-1] // Last line is the container ID
+	// The output contains the container ID
+	containerID := strings.TrimSpace(string(output))
 
 	logger := r.logger.With().
 		Str("execution_id", c.executionID).
