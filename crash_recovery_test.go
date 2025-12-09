@@ -598,7 +598,7 @@ func TestCrashRecoveryFullServerCrash(t *testing.T) {
 // 4. Kill the container while job is running
 // 5. Hypervisor detects failure and retries from checkpoint
 // 6. Verifies the job completes successfully with correct output
-func TestProcessCrashRestoreFromCheckpoint(t *testing.T) {
+func TestCrashRecoveryProcessCrashRestoreFromCheckpoint(t *testing.T) {
 	if goruntime.GOOS != "linux" {
 		t.Skip("Process crash recovery test requires Linux (Podman)")
 	}
