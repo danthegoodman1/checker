@@ -221,10 +221,8 @@ func (r *Runtime) Start(ctx context.Context, opts runtime.StartOptions) (runtime
 		Str("image", cfg.Image).
 		Msg("starting container")
 
-	checkpointDir := cfg.CheckpointDir
-	if checkpointDir == "" {
-		checkpointDir = filepath.Join(os.TempDir(), "checker", "podman-checkpoints", opts.ExecutionID)
-	}
+	// Checkpoint directory is always determined by the runtime
+	checkpointDir := filepath.Join(os.TempDir(), "checker", "podman-checkpoints", opts.ExecutionID)
 
 	return r.startContainer(ctx, opts.ExecutionID, opts.Env, cfg, checkpointDir, opts.APIHostAddress, opts.Stdout, opts.Stderr)
 }
@@ -260,11 +258,8 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 
 	logger.Debug().Msg("container restored from checkpoint")
 
-	// Get checkpoint directory from config
-	checkpointDir := c.config.CheckpointDir
-	if checkpointDir == "" {
-		checkpointDir = filepath.Join(os.TempDir(), "checker", "podman-checkpoints", c.executionID)
-	}
+	// Checkpoint directory is always determined by the runtime
+	checkpointDir := filepath.Join(os.TempDir(), "checker", "podman-checkpoints", c.executionID)
 
 	// Start log streaming if writers are provided
 	var logCancel context.CancelFunc

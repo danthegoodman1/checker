@@ -83,18 +83,12 @@ Host networking avoids network namespace issues during checkpoint/restore.
 
 ### Checkpoint Storage
 
-By default, checkpoints are exported to:
+Checkpoints are exported to:
 ```
 /tmp/checker/podman-checkpoints/<execution-id>/checkpoint-<execution-id>.tar.gz
 ```
 
-You can customize this with the `checkpoint_dir` config option:
-```json
-{
-  "image": "your-worker-image:latest",
-  "checkpoint_dir": "/var/lib/checker/checkpoints"
-}
-```
+These are portable tar files that can be moved to other nodes for restore.
 
 ## Verify Setup
 

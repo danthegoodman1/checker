@@ -49,11 +49,6 @@ type Config struct {
 
 	// Labels are additional labels to add to the container.
 	Labels map[string]string `json:"labels"`
-
-	// CheckpointDir is the directory where checkpoint tar files will be exported.
-	// If empty, defaults to /tmp/checker/podman-checkpoints/<execution-id>/
-	// Checkpoints are portable and can be moved to other nodes for restore.
-	CheckpointDir string `json:"checkpoint_dir"`
 }
 
 func (c *Config) Validate() error {
