@@ -149,14 +149,11 @@ func TestCrashRecoveryHypervisor(t *testing.T) {
 	// Phase 3: Start NEW hypervisor and recover
 	t.Log("=== Phase 3: Starting new hypervisor and recovering state ===")
 
-	// Get new ports (the old ones might still be in TIME_WAIT)
-	port2 := portCounter.Add(2)
-	callerAddr2 := fmt.Sprintf("127.0.0.1:%d", port2)
-	runtimeAddr2 := fmt.Sprintf("0.0.0.0:%d", port2+1)
-
+	// IMPORTANT: Reuse the same ports so CHECKER_API_URL in the restored container
+	// still points to a valid address. CRIU preserves environment variables.
 	h2 := hypervisor.New(hypervisor.Config{
-		CallerHTTPAddress:  callerAddr2,
-		RuntimeHTTPAddress: runtimeAddr2,
+		CallerHTTPAddress:  callerAddr,
+		RuntimeHTTPAddress: runtimeAddr,
 		Pool:               pool,
 	})
 	defer func() {
@@ -497,10 +494,11 @@ func TestCrashRecoveryFullServerCrash(t *testing.T) {
 	// Phase 3: Start NEW hypervisor and recover
 	t.Log("=== Phase 3: Starting new hypervisor and recovering ===")
 
-	port2 := portCounter.Add(2)
+	// IMPORTANT: Reuse the same ports so CHECKER_API_URL in the restored container
+	// still points to a valid address. CRIU preserves environment variables.
 	h2 := hypervisor.New(hypervisor.Config{
-		CallerHTTPAddress:  fmt.Sprintf("127.0.0.1:%d", port2),
-		RuntimeHTTPAddress: fmt.Sprintf("0.0.0.0:%d", port2+1),
+		CallerHTTPAddress:  callerAddr,
+		RuntimeHTTPAddress: runtimeAddr,
 		Pool:               pool,
 	})
 	defer func() {
