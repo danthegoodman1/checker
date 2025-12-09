@@ -26,11 +26,11 @@ type JobDefinition struct {
 	Name    string
 	Version string
 
-	// RuntimeType specifies which runtime to use (nodejs, docker, etc.)
+	// RuntimeType specifies which runtime to use (podman, etc.)
 	RuntimeType runtime.RuntimeType
 
 	// Config holds the runtime-specific configuration.
-	// For NodeJS, this would be *nodejs.Config.
+	// For Podman, this would be *podman.Config.
 	// The hypervisor passes this to the runtime when starting a job.
 	Config any
 

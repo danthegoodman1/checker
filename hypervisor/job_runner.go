@@ -2,13 +2,18 @@ package hypervisor
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"sync"
 	"time"
 
+	"github.com/danthegoodman1/checker/pg"
+	"github.com/danthegoodman1/checker/query"
 	"github.com/danthegoodman1/checker/runtime"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 )
 
@@ -61,9 +66,12 @@ type JobRunner struct {
 
 	// onFailure is called when the job fails, allowing retry logic
 	onFailure func(runner *JobRunner, exitCode int)
+
+	// Database pool for persisting state changes
+	pool *pgxpool.Pool
 }
 
-func NewJobRunner(job *Job, definition *JobDefinition, rt runtime.Runtime, config any, apiHostAddress string, stdout, stderr io.Writer) *JobRunner {
+func NewJobRunner(job *Job, definition *JobDefinition, rt runtime.Runtime, config any, apiHostAddress string, pool *pgxpool.Pool, stdout, stderr io.Writer) *JobRunner {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &JobRunner{
@@ -72,6 +80,7 @@ func NewJobRunner(job *Job, definition *JobDefinition, rt runtime.Runtime, confi
 		rt:               rt,
 		config:           config,
 		apiHostAddress:   apiHostAddress,
+		pool:             pool,
 		stdout:           stdout,
 		stderr:           stderr,
 		logger:           logger.With().Str("job_id", job.ID).Logger(),
@@ -97,13 +106,25 @@ func (r *JobRunner) Start() error {
 		r.job.State = JobStateFailed
 		r.job.Error = fmt.Sprintf("failed to start: %v", err)
 		r.jobMu.Unlock()
+
+		r.persistJobCompleted(query.JobStateFailed, nil, nil, fmt.Sprintf("failed to start: %v", err))
 		return err
 	}
 
 	r.process = process
 
-	r.jobMu.Lock()
 	now := time.Now()
+
+	if dbErr := query.ReliableExecInTx(r.ctx, r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		return q.UpdateJobStarted(ctx, query.UpdateJobStartedParams{
+			ID:        r.job.ID,
+			StartedAt: sql.NullTime{Time: now, Valid: true},
+		})
+	}); dbErr != nil {
+		r.logger.Error().Err(dbErr).Msg("failed to persist job started state to DB")
+	}
+
+	r.jobMu.Lock()
 	r.job.StartedAt = &now
 	r.job.State = JobStateRunning
 	r.jobMu.Unlock()
@@ -117,11 +138,14 @@ func (r *JobRunner) Start() error {
 func (r *JobRunner) Retry() error {
 	r.jobMu.Lock()
 	r.job.RetryCount++
+	retryCount := r.job.RetryCount
 	r.job.State = JobStatePending
 	r.job.Error = ""
 	r.job.Result = nil
 	r.job.CompletedAt = nil
 	r.jobMu.Unlock()
+
+	r.persistJobRetryCount(retryCount)
 
 	return r.Start()
 }
@@ -152,7 +176,9 @@ func (r *JobRunner) waitForExit() {
 	}
 
 	// Only update if not already terminal (could have been killed or exited via API)
+	var shouldPersist bool
 	if !r.job.IsTerminal() {
+		shouldPersist = true
 		now := time.Now()
 		r.job.CompletedAt = &now
 
@@ -171,14 +197,26 @@ func (r *JobRunner) waitForExit() {
 		}
 	}
 	failed := r.job.State == JobStateFailed
+	completedAt := r.job.CompletedAt
+	result := r.job.Result
+	errorMsg := r.job.Error
+	state := r.job.State
 	r.jobMu.Unlock()
 
-	// Cleanup process resources (e.g., remove containers)
+	if shouldPersist {
+		var dbState query.JobState
+		if state == JobStateCompleted {
+			dbState = query.JobStateCompleted
+		} else {
+			dbState = query.JobStateFailed
+		}
+		r.persistJobCompleted(dbState, completedAt, result, errorMsg)
+	}
+
 	if cleanupErr := r.process.Cleanup(context.Background()); cleanupErr != nil {
 		r.logger.Error().Err(cleanupErr).Msg("failed to cleanup process")
 	}
 
-	// Call failure callback before marking done (allows retry)
 	if failed && r.onFailure != nil {
 		r.onFailure(r, exitCode)
 		return // onFailure decides whether to markDone
@@ -215,7 +253,6 @@ func (r *JobRunner) scheduleSuspendWake(wakeTime time.Time) {
 		r.job.SuspendUntil = nil
 		r.jobMu.Unlock()
 
-		// Restore from checkpoint
 		process, err := r.rt.Restore(r.ctx, runtime.RestoreOptions{
 			Checkpoint: r.checkpoint,
 			Stdout:     r.stdout,
@@ -236,7 +273,6 @@ func (r *JobRunner) scheduleSuspendWake(wakeTime time.Time) {
 		r.process = process
 		r.logger.Debug().Msg("job restored from checkpoint")
 
-		// Start monitoring the restored process
 		go r.waitForExit()
 	})
 }
@@ -327,9 +363,8 @@ func (r *JobRunner) Checkpoint(ctx context.Context, suspendDuration time.Duratio
 		r.job.State = JobStateSuspended
 		suspendUntil := now.Add(suspendDuration)
 		r.job.SuspendUntil = &suspendUntil
-	} else {
-		r.job.State = JobStateCheckpointed
 	}
+	// When keepRunning=true, state stays as 'running' - we just record the checkpoint
 	r.jobMu.Unlock()
 
 	// Perform the checkpoint (this may stop the container on darwin)
@@ -350,6 +385,17 @@ func (r *JobRunner) Checkpoint(ctx context.Context, suspendDuration time.Duratio
 	r.checkpointTokens[token] = struct{}{}
 	r.checkpointTokensMu.Unlock()
 
+	// Persist checkpoint state to DB
+	r.jobMu.RLock()
+	dbState := query.JobStateRunning
+	if !keepRunning {
+		dbState = query.JobStateSuspended
+	}
+	lastCheckpointAt := *r.job.LastCheckpointAt
+	suspendUntilCopy := r.job.SuspendUntil
+	r.jobMu.RUnlock()
+	r.persistJobCheckpointed(dbState, lastCheckpointAt, suspendUntilCopy, checkpoint.String())
+
 	// Schedule the wake timer now that the checkpoint is stored
 	r.jobMu.Lock()
 	defer r.jobMu.Unlock()
@@ -360,7 +406,6 @@ func (r *JobRunner) Checkpoint(ctx context.Context, suspendDuration time.Duratio
 }
 
 func (r *JobRunner) Kill(ctx context.Context) (*Job, error) {
-	// Check if already terminal
 	r.jobMu.RLock()
 	if r.job.IsTerminal() {
 		r.jobMu.RUnlock()
@@ -380,6 +425,8 @@ func (r *JobRunner) Kill(ctx context.Context) (*Job, error) {
 	result := r.job.Clone()
 	r.jobMu.Unlock()
 
+	r.persistJobCompleted(query.JobStateFailed, &now, nil, "killed")
+
 	r.MarkDone()
 
 	return result, nil
@@ -388,17 +435,19 @@ func (r *JobRunner) Kill(ctx context.Context) (*Job, error) {
 // This is called by the job via the runtime API.
 func (r *JobRunner) Exit(ctx context.Context, exitCode int, output json.RawMessage) error {
 	r.jobMu.Lock()
-	defer r.jobMu.Unlock()
 
 	if r.job.IsTerminal() {
+		r.jobMu.Unlock()
 		return fmt.Errorf("job has already terminated")
 	}
 
+	var errorMsg string
 	if exitCode == 0 {
 		r.job.State = JobStateCompleted
 	} else {
 		r.job.State = JobStateFailed
-		r.job.Error = fmt.Sprintf("exit code %d", exitCode)
+		errorMsg = fmt.Sprintf("exit code %d", exitCode)
+		r.job.Error = errorMsg
 	}
 	r.job.Result = &JobResult{
 		ExitCode: exitCode,
@@ -406,6 +455,19 @@ func (r *JobRunner) Exit(ctx context.Context, exitCode int, output json.RawMessa
 	}
 	now := time.Now()
 	r.job.CompletedAt = &now
+
+	state := r.job.State
+	result := r.job.Result
+	r.jobMu.Unlock()
+
+	// Persist exit state to DB
+	var dbState query.JobState
+	if state == JobStateCompleted {
+		dbState = query.JobStateCompleted
+	} else {
+		dbState = query.JobStateFailed
+	}
+	r.persistJobCompleted(dbState, &now, result, errorMsg)
 
 	// Don't call MarkDone here - waitForExit will handle it when process actually exits
 	return nil
@@ -486,4 +548,84 @@ func (r *JobRunner) Done() <-chan struct{} {
 // Stop gracefully stops the actor.
 func (r *JobRunner) Stop() {
 	r.cancel()
+}
+
+// persistJobCompleted persists the job completion state to the database.
+func (r *JobRunner) persistJobCompleted(state query.JobState, completedAt *time.Time, result *JobResult, errorMsg string) {
+	var resultExitCode pgtype.Int4
+	var resultOutput []byte
+	var errStr sql.NullString
+
+	if result != nil {
+		resultExitCode = pgtype.Int4{Int32: int32(result.ExitCode), Valid: true}
+		if result.Output != nil {
+			resultOutput = result.Output
+		}
+	}
+
+	if errorMsg != "" {
+		errStr = sql.NullString{String: errorMsg, Valid: true}
+	}
+
+	var completedAtSQL sql.NullTime
+	if completedAt != nil {
+		completedAtSQL = sql.NullTime{Time: *completedAt, Valid: true}
+	}
+
+	if dbErr := query.ReliableExecInTx(context.Background(), r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		return q.UpdateJobCompleted(ctx, query.UpdateJobCompletedParams{
+			ID:             r.job.ID,
+			State:          state,
+			CompletedAt:    completedAtSQL,
+			ResultExitCode: resultExitCode,
+			ResultOutput:   resultOutput,
+			Error:          errStr,
+		})
+	}); dbErr != nil {
+		r.logger.Error().Err(dbErr).Msg("failed to persist job completed state to DB")
+	}
+}
+
+// persistJobCheckpointed persists the job checkpoint state to the database.
+func (r *JobRunner) persistJobCheckpointed(state query.JobState, lastCheckpointAt time.Time, suspendUntil *time.Time, checkpointPath string) {
+	var suspendUntilSQL sql.NullTime
+	if suspendUntil != nil {
+		suspendUntilSQL = sql.NullTime{Time: *suspendUntil, Valid: true}
+	}
+
+	if dbErr := query.ReliableExecInTx(context.Background(), r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		return q.UpdateJobCheckpointed(ctx, query.UpdateJobCheckpointedParams{
+			ID:               r.job.ID,
+			State:            state,
+			LastCheckpointAt: sql.NullTime{Time: lastCheckpointAt, Valid: true},
+			SuspendUntil:     suspendUntilSQL,
+			CheckpointPath:   sql.NullString{String: checkpointPath, Valid: checkpointPath != ""},
+		})
+	}); dbErr != nil {
+		r.logger.Error().Err(dbErr).Msg("failed to persist job checkpoint state to DB")
+	}
+}
+
+// persistJobRetryCount persists the job retry count to the database.
+func (r *JobRunner) persistJobRetryCount(retryCount int) {
+	if dbErr := query.ReliableExecInTx(context.Background(), r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		return q.UpdateJobRetryCount(ctx, query.UpdateJobRetryCountParams{
+			ID:         r.job.ID,
+			RetryCount: int32(retryCount),
+		})
+	}); dbErr != nil {
+		r.logger.Error().Err(dbErr).Msg("failed to persist job retry count to DB")
+	}
+}
+
+// persistJobState persists just the job state to the database.
+func (r *JobRunner) persistJobState(state query.JobState) {
+	if dbErr := query.ReliableExecInTx(context.Background(), r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		return q.UpdateJobState(ctx, query.UpdateJobStateParams{
+			ID:    r.job.ID,
+			State: state,
+		})
+	}); dbErr != nil {
+		r.logger.Error().Err(dbErr).Msg("failed to persist job state to DB")
+	}
 }

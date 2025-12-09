@@ -99,6 +99,13 @@ func SQLNullInt64(s int64) sql.NullInt64 {
 	}
 }
 
+func SQLNullTime(t time.Time) sql.NullTime {
+	return sql.NullTime{
+		Time:  t,
+		Valid: !t.IsZero(),
+	}
+}
+
 func GenRandomShortID() string {
 	// reduced character set that's less probable to mis-type
 	// change for conflicts is still only 1:128 trillion

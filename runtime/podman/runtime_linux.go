@@ -238,9 +238,24 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 		Str("export_path", c.exportPath).
 		Msg("restoring container from checkpoint")
 
+	// Clean up any existing container with the same name before restoring.
+	// This handles crash recovery where the old container (stopped after checkpoint) still exists,
+	// or normal wake where we want a clean slate.
+	containerName := fmt.Sprintf("checker-%s", c.executionID)
+	cleanupCmd := exec.CommandContext(ctx, "podman", "rm", "-f", "--ignore", containerName)
+	if cleanupOutput, cleanupErr := cleanupCmd.CombinedOutput(); cleanupErr != nil {
+		// Log but don't fail - container might not exist
+		r.logger.Debug().
+			Err(cleanupErr).
+			Str("output", string(cleanupOutput)).
+			Str("container_name", containerName).
+			Msg("cleanup of existing container failed (may not exist)")
+	}
+
 	// Restore from exported checkpoint file
 	cmd := exec.CommandContext(ctx, "podman", "container", "restore",
 		"--import", c.exportPath,
+		"--name", containerName,
 		"--tcp-established",
 	)
 	output, err := cmd.CombinedOutput()
@@ -406,6 +421,22 @@ func (r *Runtime) streamLogs(containerID string, stdout, stderr io.Writer, logge
 // Close is a no-op for CLI-based runtime.
 func (r *Runtime) Close() error {
 	return nil
+}
+
+// ReconstructCheckpoint rebuilds a Checkpoint from persisted data.
+func (r *Runtime) ReconstructCheckpoint(checkpointPath string, executionID string, env map[string]string, config any, apiHostAddress string) (runtime.Checkpoint, error) {
+	cfg, ok := config.(*Config)
+	if !ok {
+		return nil, fmt.Errorf("invalid config type: expected *podman.Config, got %T", config)
+	}
+
+	return &podmanCheckpoint{
+		executionID:    executionID,
+		exportPath:     checkpointPath,
+		env:            env,
+		config:         cfg,
+		apiHostAddress: apiHostAddress,
+	}, nil
 }
 
 // Ensure Runtime implements runtime.Runtime
