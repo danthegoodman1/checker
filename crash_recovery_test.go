@@ -586,3 +586,161 @@ func TestCrashRecoveryFullServerCrash(t *testing.T) {
 	_, _ = pool.Exec(ctx, "DELETE FROM jobs WHERE id = $1", jobID)
 	_, _ = pool.Exec(ctx, "DELETE FROM job_definitions WHERE name = $1", "full-crash-test")
 }
+
+// TestContainerCrashWhileRunning verifies that when a container is killed while
+// the job is actively running (not suspended), the hypervisor detects this and
+// marks the job as failed appropriately.
+//
+// This test:
+// 1. Starts a hypervisor and spawns a job
+// 2. Waits for the job to start running
+// 3. Force kills the container while it's running
+// 4. Hypervisor stays running and should detect the failure
+// 5. Verifies the job is marked as failed
+func TestContainerCrashWhileRunning(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("Container crash test requires Linux (Podman)")
+	}
+
+	if utils.PG_DSN == "" {
+		t.Skip("PG_DSN environment variable not set")
+	}
+
+	// Run migrations
+	_, err := migrations.RunMigrations(utils.PG_DSN)
+	require.NoError(t, err)
+
+	pool, err := pgxpool.New(context.Background(), utils.PG_DSN)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	// Build the test image
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	demoDir := filepath.Join(cwd, "demo")
+
+	cmd := exec.Command("podman", "build", "-t", "checker-checkpoint-restore-test:latest",
+		"-f", filepath.Join(demoDir, "Dockerfile.checkpoint_restore"), demoDir)
+	buildOutput, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to build test image: %v\n%s", err, buildOutput)
+	}
+
+	port := portCounter.Add(2)
+	callerAddr := fmt.Sprintf("127.0.0.1:%d", port)
+	runtimeAddr := fmt.Sprintf("0.0.0.0:%d", port+1)
+
+	ctx := context.Background()
+
+	t.Log("=== Phase 1: Starting hypervisor and spawning job ===")
+
+	h := hypervisor.New(hypervisor.Config{
+		CallerHTTPAddress:  callerAddr,
+		RuntimeHTTPAddress: runtimeAddr,
+		Pool:               pool,
+	})
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		h.Shutdown(shutdownCtx)
+	}()
+
+	podmanRuntime, err := podman.NewRuntime()
+	require.NoError(t, err)
+	defer podmanRuntime.Close()
+
+	require.NoError(t, h.RegisterRuntime(podmanRuntime))
+
+	jd := &hypervisor.JobDefinition{
+		Name:        "container-crash-running-test",
+		Version:     "1.0.0",
+		RuntimeType: runtime.RuntimeTypePodman,
+		Config: &podman.Config{
+			Image:   "checker-checkpoint-restore-test:latest",
+			Network: "host",
+		},
+	}
+	require.NoError(t, h.RegisterJobDefinition(jd))
+
+	// Use skip_checkpoint=true with a long sleep so the job runs long enough for us to kill it
+	jobID, err := h.Spawn(ctx, hypervisor.SpawnOptions{
+		DefinitionName:    "container-crash-running-test",
+		DefinitionVersion: "1.0.0",
+		// skip_checkpoint=true means the job will run through without checkpointing
+		// sleep_ms adds a delay so we have time to kill the container while it's running
+		Params: json.RawMessage(`{"number": 10, "skip_checkpoint": true, "sleep_ms": 30000}`),
+		Stdout: &testLogWriter{t: t, prefix: "[stdout]"},
+		Stderr: &testLogWriter{t: t, prefix: "[stderr]"},
+	})
+	require.NoError(t, err)
+	t.Logf("Spawned job: %s", jobID)
+
+	// Wait for job to be running
+	t.Log("Waiting for job to start running...")
+	var running bool
+	for i := 0; i < 30; i++ {
+		var dbJob query.Job
+		err := query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+			var err error
+			dbJob, err = q.GetJob(ctx, jobID)
+			return err
+		})
+		require.NoError(t, err)
+
+		if dbJob.State == query.JobStateRunning {
+			running = true
+			t.Log("Job is now running")
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	require.True(t, running, "Job did not reach running state")
+
+	// Give the job a moment to actually start executing
+	time.Sleep(1 * time.Second)
+
+	// Phase 2: Kill the container while it's running
+	t.Log("=== Phase 2: Killing container while running ===")
+
+	containerName := fmt.Sprintf("checker-%s", jobID)
+	killCmd := exec.Command("podman", "kill", containerName)
+	killOutput, err := killCmd.CombinedOutput()
+	t.Logf("Killed container %s: %s (err: %v)", containerName, string(killOutput), err)
+
+	// Phase 3: Wait for hypervisor to detect the failure
+	t.Log("=== Phase 3: Waiting for hypervisor to detect failure ===")
+
+	var completed bool
+	var finalState query.JobState
+	for i := 0; i < 60; i++ {
+		var dbJob query.Job
+		err := query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+			var err error
+			dbJob, err = q.GetJob(ctx, jobID)
+			return err
+		})
+		require.NoError(t, err)
+
+		finalState = dbJob.State
+		if dbJob.State == query.JobStateCompleted || dbJob.State == query.JobStateFailed {
+			completed = true
+			t.Logf("Job finished with state: %s", dbJob.State)
+			if dbJob.Error.Valid {
+				t.Logf("Job error: %s", dbJob.Error.String)
+			}
+			break
+		}
+		t.Logf("Job state: %s, waiting...", dbJob.State)
+		time.Sleep(500 * time.Millisecond)
+	}
+	require.True(t, completed, "Job did not reach terminal state")
+
+	// The job should have failed because we killed it
+	assert.Equal(t, query.JobStateFailed, finalState, "Job should have failed after container was killed")
+
+	t.Log("=== Container crash while running test PASSED ===")
+
+	// Cleanup
+	_, _ = pool.Exec(ctx, "DELETE FROM jobs WHERE id = $1", jobID)
+	_, _ = pool.Exec(ctx, "DELETE FROM job_definitions WHERE name = $1", "container-crash-running-test")
+}

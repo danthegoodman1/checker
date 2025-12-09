@@ -86,6 +86,7 @@ async function main() {
   const inputNumber = params.number ?? 0
   const suspendDuration = params.suspend_duration ?? "4s"
   const skipCheckpoint = params.skip_checkpoint ?? false
+  const sleepMs = params.sleep_ms ?? 0
 
   // This code runs once before checkpoint
   preCheckpointRuns++
@@ -94,6 +95,12 @@ async function main() {
   console.log("Step 1: Adding 1 to input...")
   const step1Result = { step: 1, value: inputNumber + 1 }
   console.log("Step 1 complete:", step1Result)
+
+  // Optional sleep (useful for testing container kill scenarios)
+  if (sleepMs > 0) {
+    console.log(`Sleeping for ${sleepMs}ms...`)
+    await new Promise((resolve) => setTimeout(resolve, sleepMs))
+  }
 
   // Checkpoint and suspend - with CRIU, execution continues from here after restore
   if (!skipCheckpoint) {
