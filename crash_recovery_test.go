@@ -671,7 +671,7 @@ func TestProcessCrashRestoreFromCheckpoint(t *testing.T) {
 	// Spawn job that will:
 	// 1. Do step 1 (add 1)
 	// 2. Checkpoint with keep_running=true
-	// 3. Sleep for 60 seconds (we'll kill it during this sleep)
+	// 3. Sleep for 10 seconds (we'll kill it during this sleep)
 	// 4. Do step 2 (double the value) - this runs after restore
 	jobID, err := h.Spawn(ctx, hypervisor.SpawnOptions{
 		DefinitionName:    "process-crash-checkpoint-test",
@@ -679,7 +679,7 @@ func TestProcessCrashRestoreFromCheckpoint(t *testing.T) {
 		Params: json.RawMessage(`{
 			"number": 5,
 			"checkpoint_keep_running": true,
-			"sleep_after_checkpoint_ms": 60000
+			"sleep_after_checkpoint_ms": 10000
 		}`),
 		Stdout: &testLogWriter{t: t, prefix: "[stdout]"},
 		Stderr: &testLogWriter{t: t, prefix: "[stderr]"},
