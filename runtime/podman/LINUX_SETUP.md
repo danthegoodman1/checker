@@ -37,21 +37,8 @@ sudo criu check
 ### 3. Convert Podman to runc
 
 ```bash
-sudo mkdir -p /etc/containers
+sudo mkdir -p /etc/containers && echo -e '[engine]\nruntime = "runc"' | sudo tee /etc/containers/containers.conf
 
-# Edit (or create) /etc/containers/containers.conf
-sudo nano /etc/containers/containers.conf
-```
-
-Add the following configuration:
-
-```toml
-[engine]
-runtime = "runc"
-```
-
-Verify the runtime is set correctly:
-
-```bash
+# Verify the runtime is set correctly
 podman info --format '{{.Host.OCIRuntime.Path}}'
 ```
