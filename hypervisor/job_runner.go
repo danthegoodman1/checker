@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"time"
 
@@ -189,10 +190,18 @@ func (r *JobRunner) restoreFromCheckpoint() error {
 
 	// Use background context for restore - the runner's context may have been affected
 	// by the previous process's failure or cleanup
+	stdout := r.stdout
+	stderr := r.stderr
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	if stderr == nil {
+		stderr = os.Stderr
+	}
 	process, err := r.rt.Restore(context.Background(), runtime.RestoreOptions{
 		Checkpoint: r.checkpoint,
-		Stdout:     r.stdout,
-		Stderr:     r.stderr,
+		Stdout:     stdout,
+		Stderr:     stderr,
 	})
 	if err != nil {
 		r.logger.Error().Err(err).Msg("failed to restore from checkpoint")
