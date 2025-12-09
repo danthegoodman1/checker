@@ -187,7 +187,11 @@ func (r *JobRunner) restoreFromCheckpoint() error {
 	r.job.SuspendUntil = nil
 	r.jobMu.Unlock()
 
-	process, err := r.rt.Restore(r.ctx, runtime.RestoreOptions{
+	// Use a fresh context for restore - the old process's context state shouldn't affect this
+	restoreCtx, restoreCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer restoreCancel()
+
+	process, err := r.rt.Restore(restoreCtx, runtime.RestoreOptions{
 		Checkpoint: r.checkpoint,
 		Stdout:     r.stdout,
 		Stderr:     r.stderr,
