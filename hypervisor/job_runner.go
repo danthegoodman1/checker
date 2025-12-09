@@ -182,16 +182,18 @@ func (r *JobRunner) Retry() error {
 
 // restoreFromCheckpoint restores the job from its checkpoint.
 func (r *JobRunner) restoreFromCheckpoint() error {
+	// Create a fresh context for this restore attempt - the old context may have been
+	// affected by the previous process's failure
+	ctx, cancel := context.WithCancel(context.Background())
+	r.ctx = ctx
+	r.cancel = cancel
+
 	r.jobMu.Lock()
 	r.job.State = JobStateRunning
 	r.job.SuspendUntil = nil
 	r.jobMu.Unlock()
 
-	// Use a fresh context for restore - the old process's context state shouldn't affect this
-	restoreCtx, restoreCancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer restoreCancel()
-
-	process, err := r.rt.Restore(restoreCtx, runtime.RestoreOptions{
+	process, err := r.rt.Restore(r.ctx, runtime.RestoreOptions{
 		Checkpoint: r.checkpoint,
 		Stdout:     r.stdout,
 		Stderr:     r.stderr,
