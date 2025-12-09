@@ -82,7 +82,6 @@ func TestCrashRecoveryHypervisor(t *testing.T) {
 
 	podmanRuntime, err := podman.NewRuntime()
 	require.NoError(t, err)
-	defer podmanRuntime.Close()
 
 	require.NoError(t, h1.RegisterRuntime(podmanRuntime))
 
@@ -136,11 +135,10 @@ func TestCrashRecoveryHypervisor(t *testing.T) {
 	}
 	require.True(t, suspended, "Job did not reach suspended state")
 
-	// Simulate crash by shutting down hypervisor
-	t.Log("=== Phase 2: Simulating crash (shutting down hypervisor) ===")
-	shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	require.NoError(t, h1.Shutdown(shutdownCtx))
-	cancel()
+	// Simulate crash by forcibly closing hypervisor (not graceful shutdown)
+	t.Log("=== Phase 2: Simulating crash (DevCrash) ===")
+	h1.DevCrash()
+	podmanRuntime.Close()
 
 	// Small delay to ensure everything is cleaned up
 	time.Sleep(500 * time.Millisecond)
