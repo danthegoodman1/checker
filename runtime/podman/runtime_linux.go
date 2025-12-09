@@ -151,8 +151,17 @@ func (h *processHandle) Kill(ctx context.Context) error {
 }
 
 func (h *processHandle) Wait(ctx context.Context) (int, error) {
+	h.logger.Debug().Msg("waiting for container to exit")
+
 	cmd := exec.CommandContext(ctx, "podman", "wait", h.containerID)
 	output, err := cmd.Output()
+
+	h.logger.Debug().
+		Err(err).
+		Str("output", string(output)).
+		Bool("ctx_done", ctx.Err() != nil).
+		Msg("podman wait returned")
+
 	if err != nil {
 		return -1, fmt.Errorf("failed to wait for container: %w", err)
 	}
@@ -161,6 +170,7 @@ func (h *processHandle) Wait(ctx context.Context) (int, error) {
 	if _, err := fmt.Sscanf(strings.TrimSpace(string(output)), "%d", &exitCode); err != nil {
 		return -1, fmt.Errorf("failed to parse exit code: %w", err)
 	}
+	h.logger.Debug().Int("exit_code", exitCode).Msg("container exited")
 	return exitCode, nil
 }
 
