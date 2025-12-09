@@ -127,6 +127,9 @@ func TestCrashRecoveryHypervisor(t *testing.T) {
 				dbJob.CheckpointCount, dbJob.SuspendUntil.Time)
 			break
 		}
+		if dbJob.State == query.JobStateFailed {
+			t.Fatalf("Job failed with error: %s", dbJob.Error.String)
+		}
 		t.Logf("Job state: %s, waiting...", dbJob.State)
 		time.Sleep(500 * time.Millisecond)
 	}
