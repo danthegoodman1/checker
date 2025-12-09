@@ -1270,8 +1270,8 @@ func (h *Hypervisor) wakeJob(ctx context.Context, dbJob query.Job) error {
 
 	process, err := rt.Restore(ctx, runtime.RestoreOptions{
 		Checkpoint: checkpoint,
-		Stdout:     nil, // TODO: Support stdout/stderr for restored jobs
-		Stderr:     nil,
+		Stdout:     os.Stdout, // TODO: Support stdout/stderr for restored jobs
+		Stderr:     os.Stderr,
 	})
 	if err != nil {
 		// Cancel runner context to unblock any pending checkpoint requests
