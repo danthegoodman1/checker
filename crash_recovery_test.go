@@ -290,7 +290,7 @@ func TestCrashRecoveryPendingJob(t *testing.T) {
 	require.NoError(t, err)
 
 	// Insert the pending job
-	params, _ := json.Marshal(map[string]any{"number": 7, "checkpoint_within_secs": 0})
+	params, _ := json.Marshal(map[string]any{"number": 7, "skip_checkpoint": true})
 	_, err = pool.Exec(ctx, `
 		INSERT INTO jobs (id, definition_name, definition_version, state, env, params, 
 		                  runtime_type, runtime_config, metadata, created_at)
@@ -444,7 +444,7 @@ func TestCrashRecoveryFullServerCrash(t *testing.T) {
 	jobID, err := h1.Spawn(ctx, hypervisor.SpawnOptions{
 		DefinitionName:    "full-crash-test",
 		DefinitionVersion: "1.0.0",
-		Params:            json.RawMessage(`{"number": 3, "checkpoint_within_secs": 10, "suspend_duration": "60s"}`),
+		Params:            json.RawMessage(`{"number": 3, "suspend_duration": "5s"}`),
 	})
 	require.NoError(t, err)
 	t.Logf("Spawned job: %s", jobID)

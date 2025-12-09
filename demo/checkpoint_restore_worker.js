@@ -85,6 +85,7 @@ async function main() {
 
   const inputNumber = params.number ?? 0
   const suspendDuration = params.suspend_duration ?? "4s"
+  const skipCheckpoint = params.skip_checkpoint ?? false
 
   // This code runs once before checkpoint
   preCheckpointRuns++
@@ -95,9 +96,11 @@ async function main() {
   console.log("Step 1 complete:", step1Result)
 
   // Checkpoint and suspend - with CRIU, execution continues from here after restore
-  console.log("Checkpointing with suspend...")
-  const checkpointResult = await checkpoint(suspendDuration)
-  console.log("Checkpoint complete:", JSON.stringify(checkpointResult))
+  if (!skipCheckpoint) {
+    console.log("Checkpointing with suspend...")
+    const checkpointResult = await checkpoint(suspendDuration)
+    console.log("Checkpoint complete:", JSON.stringify(checkpointResult))
+  }
 
   // This code runs after restore
   console.log("Step 2: Doubling the value...")
