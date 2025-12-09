@@ -282,9 +282,11 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 	}
 
 	// Restore from exported checkpoint file
+	// Note: We don't use --tcp-established on restore because the original TCP connections
+	// are dead after a crash. The restored process will get connection errors which it
+	// should handle gracefully (e.g., retry logic in the worker).
 	cmd := exec.CommandContext(ctx, "podman", "container", "restore",
 		"--import", c.exportPath,
-		"--tcp-established",
 	)
 	output, err := cmd.CombinedOutput()
 
