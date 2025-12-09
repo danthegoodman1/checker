@@ -318,7 +318,7 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 	// Start log streaming if writers are provided
 	var logCancel context.CancelFunc
 	if opts.Stdout != nil || opts.Stderr != nil {
-		logCancel = r.streamLogs(containerID, opts.Stdout, opts.Stderr, logger)
+		logCancel = r.streamLogs(ctx, containerID, opts.Stdout, opts.Stderr, logger)
 	}
 
 	return &processHandle{
@@ -417,7 +417,7 @@ func (r *Runtime) startContainer(ctx context.Context, executionID string, env ma
 	// Start log streaming if writers are provided
 	var logCancel context.CancelFunc
 	if stdout != nil || stderr != nil {
-		logCancel = r.streamLogs(containerID, stdout, stderr, logger)
+		logCancel = r.streamLogs(ctx, containerID, stdout, stderr, logger)
 	}
 
 	return &processHandle{
@@ -435,8 +435,8 @@ func (r *Runtime) startContainer(ctx context.Context, executionID string, env ma
 
 // streamLogs fetches container logs and writes them to the provided writers.
 // Returns a cancel function to stop log streaming.
-func (r *Runtime) streamLogs(containerID string, stdout, stderr io.Writer, logger zerolog.Logger) context.CancelFunc {
-	ctx, cancel := context.WithCancel(context.Background())
+func (r *Runtime) streamLogs(parentCtx context.Context, containerID string, stdout, stderr io.Writer, logger zerolog.Logger) context.CancelFunc {
+	ctx, cancel := context.WithCancel(parentCtx)
 
 	go func() {
 		cmd := exec.CommandContext(ctx, "podman", "logs", "-f", containerID)

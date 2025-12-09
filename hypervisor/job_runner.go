@@ -188,8 +188,6 @@ func (r *JobRunner) restoreFromCheckpoint() error {
 	r.job.SuspendUntil = nil
 	r.jobMu.Unlock()
 
-	// Use background context for restore - the runner's context may have been affected
-	// by the previous process's failure or cleanup
 	stdout := r.stdout
 	stderr := r.stderr
 	if stdout == nil {
@@ -198,7 +196,7 @@ func (r *JobRunner) restoreFromCheckpoint() error {
 	if stderr == nil {
 		stderr = os.Stderr
 	}
-	process, err := r.rt.Restore(context.Background(), runtime.RestoreOptions{
+	process, err := r.rt.Restore(r.ctx, runtime.RestoreOptions{
 		Checkpoint: r.checkpoint,
 		Stdout:     stdout,
 		Stderr:     stderr,
@@ -217,11 +215,8 @@ func (r *JobRunner) restoreFromCheckpoint() error {
 	r.process = process
 	r.logger.Debug().Msg("job restored from checkpoint")
 
-	// Persist running state with a timeout context (not r.ctx which may be cancelled)
 	now := time.Now()
-	dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer dbCancel()
-	if dbErr := query.ReliableExec(dbCtx, r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+	if dbErr := query.ReliableExec(r.ctx, r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 		return q.UpdateJobStarted(ctx, query.UpdateJobStartedParams{
 			ID:        r.job.ID,
 			StartedAt: sql.NullTime{Time: now, Valid: true},
@@ -298,7 +293,7 @@ func (r *JobRunner) waitForExit() {
 		r.persistJobCompleted(dbState, completedAt, result, errorMsg)
 	}
 
-	if cleanupErr := r.process.Cleanup(context.Background()); cleanupErr != nil {
+	if cleanupErr := r.process.Cleanup(r.ctx); cleanupErr != nil {
 		r.logger.Error().Err(cleanupErr).Msg("failed to cleanup process")
 	}
 
@@ -677,7 +672,7 @@ func (r *JobRunner) persistJobCompleted(state query.JobState, completedAt *time.
 		completedAtSQL = sql.NullTime{Time: *completedAt, Valid: true}
 	}
 
-	if dbErr := query.ReliableExecInTx(context.Background(), r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+	if dbErr := query.ReliableExecInTx(r.ctx, r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 		return q.UpdateJobCompleted(ctx, query.UpdateJobCompletedParams{
 			ID:             r.job.ID,
 			State:          state,
@@ -698,7 +693,7 @@ func (r *JobRunner) persistJobCheckpointed(state query.JobState, lastCheckpointA
 		suspendUntilSQL = sql.NullTime{Time: *suspendUntil, Valid: true}
 	}
 
-	if dbErr := query.ReliableExecInTx(context.Background(), r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+	if dbErr := query.ReliableExecInTx(r.ctx, r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 		return q.UpdateJobCheckpointed(ctx, query.UpdateJobCheckpointedParams{
 			ID:               r.job.ID,
 			State:            state,
@@ -713,7 +708,7 @@ func (r *JobRunner) persistJobCheckpointed(state query.JobState, lastCheckpointA
 
 // persistJobRetryCount persists the job retry count to the database.
 func (r *JobRunner) persistJobRetryCount(retryCount int) {
-	if dbErr := query.ReliableExecInTx(context.Background(), r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+	if dbErr := query.ReliableExecInTx(r.ctx, r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 		return q.UpdateJobRetryCount(ctx, query.UpdateJobRetryCountParams{
 			ID:         r.job.ID,
 			RetryCount: int32(retryCount),
@@ -725,7 +720,7 @@ func (r *JobRunner) persistJobRetryCount(retryCount int) {
 
 // persistJobState persists just the job state to the database.
 func (r *JobRunner) persistJobState(state query.JobState) {
-	if dbErr := query.ReliableExecInTx(context.Background(), r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+	if dbErr := query.ReliableExecInTx(r.ctx, r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 		return q.UpdateJobState(ctx, query.UpdateJobStateParams{
 			ID:    r.job.ID,
 			State: state,

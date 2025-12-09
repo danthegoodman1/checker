@@ -95,10 +95,10 @@ func TestCrashRecoveryHypervisor(t *testing.T) {
 			Network: "host",
 		},
 	}
-	require.NoError(t, h1.RegisterJobDefinition(jd))
+	ctx := context.Background()
+	require.NoError(t, h1.RegisterJobDefinition(ctx, jd))
 
 	// Spawn job that will checkpoint and suspend
-	ctx := context.Background()
 	jobID, err := h1.Spawn(ctx, hypervisor.SpawnOptions{
 		DefinitionName:    "crash-recovery-test",
 		DefinitionVersion: "1.0.0",
@@ -448,7 +448,7 @@ func TestCrashRecoveryFullServerCrash(t *testing.T) {
 			Network: "host",
 		},
 	}
-	require.NoError(t, h1.RegisterJobDefinition(jd))
+	require.NoError(t, h1.RegisterJobDefinition(ctx, jd))
 
 	jobID, err := h1.Spawn(ctx, hypervisor.SpawnOptions{
 		DefinitionName:    "full-crash-test",
@@ -666,7 +666,7 @@ func TestProcessCrashRestoreFromCheckpoint(t *testing.T) {
 			RetryDelay: "100ms",
 		},
 	}
-	require.NoError(t, h.RegisterJobDefinition(jd))
+	require.NoError(t, h.RegisterJobDefinition(ctx, jd))
 
 	// Spawn job that will:
 	// 1. Do step 1 (add 1)

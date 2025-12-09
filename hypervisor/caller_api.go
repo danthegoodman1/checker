@@ -56,7 +56,7 @@ func (h *Hypervisor) handleRegisterJobDefinition(c echo.Context) error {
 		Metadata:    req.Metadata,
 	}
 
-	if err := h.RegisterJobDefinition(jd); err != nil {
+	if err := h.RegisterJobDefinition(c.Request().Context(), jd); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
 
@@ -74,7 +74,7 @@ func (h *Hypervisor) handleUnregisterJobDefinition(c echo.Context) error {
 		return err
 	}
 
-	if err := h.UnregisterJobDefinition(req.Name, req.Version); err != nil {
+	if err := h.UnregisterJobDefinition(c.Request().Context(), req.Name, req.Version); err != nil {
 		return echo.NewHTTPError(http.StatusNotFound, err.Error())
 	}
 

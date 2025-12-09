@@ -129,7 +129,7 @@ func (h *Hypervisor) RegisterRuntime(rt runtime.Runtime) error {
 
 // RegisterJobDefinition registers a job definition.
 // Called via caller API
-func (h *Hypervisor) RegisterJobDefinition(jd *JobDefinition) error {
+func (h *Hypervisor) RegisterJobDefinition(ctx context.Context, jd *JobDefinition) error {
 	// Validate that we have a runtime for this job type
 	h.runnersMu.RLock()
 	_, hasRuntime := h.runtimes[jd.RuntimeType]
@@ -157,7 +157,6 @@ func (h *Hypervisor) RegisterJobDefinition(jd *JobDefinition) error {
 		return fmt.Errorf("failed to marshal metadata: %w", err)
 	}
 
-	ctx := context.Background()
 	err = query.ReliableExecInTx(ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 		return q.UpsertJobDefinition(ctx, query.UpsertJobDefinitionParams{
 			Name:        jd.Name,
@@ -176,9 +175,8 @@ func (h *Hypervisor) RegisterJobDefinition(jd *JobDefinition) error {
 }
 
 // Called via caller API
-func (h *Hypervisor) UnregisterJobDefinition(name, version string) error {
+func (h *Hypervisor) UnregisterJobDefinition(ctx context.Context, name, version string) error {
 	// Delete from database first
-	ctx := context.Background()
 	err := query.ReliableExecInTx(ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 		return q.DeleteJobDefinition(ctx, query.DeleteJobDefinitionParams{
 			Name:    name,
@@ -311,7 +309,7 @@ func (h *Hypervisor) Spawn(ctx context.Context, opts SpawnOptions) (string, erro
 
 	// Set up retry callback
 	runner.SetOnFailure(func(r *JobRunner, exitCode int) {
-		job, _ := r.GetState(context.Background())
+		job, _ := r.GetState(r.ctx)
 		maxRetries := 0
 		var retryDelay time.Duration
 		if jd.RetryPolicy != nil {
@@ -359,7 +357,7 @@ func (h *Hypervisor) Spawn(ctx context.Context, opts SpawnOptions) (string, erro
 	// Start a goroutine to evict the job when it completes
 	go func() {
 		<-runner.Done()
-		job, err := runner.GetState(context.Background())
+		job, err := runner.GetState(h.ctx)
 		if err != nil {
 			logger.Error().Err(err).Str("job_id", jobID).Msg("failed to get job state for eviction")
 			return
@@ -888,7 +886,7 @@ func (h *Hypervisor) restartPendingJob(ctx context.Context, dbJob query.Job) err
 	runner := NewJobRunner(job, jd, rt, jd.Config, h.runtimeHTTPAddress, h.pool, nil, nil)
 
 	runner.SetOnFailure(func(r *JobRunner, exitCode int) {
-		job, _ := r.GetState(context.Background())
+		job, _ := r.GetState(r.ctx)
 		maxRetries := 0
 		var retryDelay time.Duration
 		if jd.RetryPolicy != nil {
@@ -936,7 +934,7 @@ func (h *Hypervisor) restartPendingJob(ctx context.Context, dbJob query.Job) err
 	// Start eviction goroutine
 	go func() {
 		<-runner.Done()
-		job, err := runner.GetState(context.Background())
+		job, err := runner.GetState(h.ctx)
 		if err != nil {
 			return
 		}
@@ -986,7 +984,7 @@ func (h *Hypervisor) scheduleJobWake(ctx context.Context, dbJob query.Job) error
 	runner.checkpoint = checkpoint
 
 	runner.SetOnFailure(func(r *JobRunner, exitCode int) {
-		job, _ := r.GetState(context.Background())
+		job, _ := r.GetState(r.ctx)
 		maxRetries := 0
 		var retryDelay time.Duration
 		if jd.RetryPolicy != nil {
@@ -1139,10 +1137,8 @@ func (h *Hypervisor) startWakePoller() {
 
 // wakeReadyJobs queries for suspended jobs that are ready to wake and restores them.
 func (h *Hypervisor) wakeReadyJobs() {
-	ctx := context.Background()
-
 	var dbJobs []query.Job
-	err := query.ReliableExec(ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+	err := query.ReliableExec(h.ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 		var err error
 		dbJobs, err = q.GetSuspendedJobsToWake(ctx, query.GetSuspendedJobsToWakeParams{
 			SuspendUntil: utils.SQLNullTime(time.Now()),
@@ -1164,7 +1160,7 @@ func (h *Hypervisor) wakeReadyJobs() {
 			continue
 		}
 
-		if err := h.wakeJob(ctx, dbJob); err != nil {
+		if err := h.wakeJob(h.ctx, dbJob); err != nil {
 			logger.Error().
 				Err(err).
 				Str("job_id", dbJob.ID).
@@ -1227,7 +1223,7 @@ func (h *Hypervisor) wakeJob(ctx context.Context, dbJob query.Job) error {
 	runner.checkpoint = checkpoint
 
 	runner.SetOnFailure(func(r *JobRunner, exitCode int) {
-		job, _ := r.GetState(context.Background())
+		job, _ := r.GetState(r.ctx)
 		maxRetries := 0
 		var retryDelay time.Duration
 		if jd.RetryPolicy != nil {
@@ -1298,7 +1294,7 @@ func (h *Hypervisor) wakeJob(ctx context.Context, dbJob query.Job) error {
 
 	go func() {
 		<-runner.Done()
-		job, err := runner.GetState(context.Background())
+		job, err := runner.GetState(h.ctx)
 		if err != nil {
 			logger.Error().Err(err).Str("job_id", dbJob.ID).Msg("failed to get job state for eviction")
 			return
