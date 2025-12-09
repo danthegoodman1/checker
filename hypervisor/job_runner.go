@@ -283,7 +283,12 @@ func (r *JobRunner) waitForExit() {
 	state := r.job.State
 	r.jobMu.Unlock()
 
-	if shouldPersist {
+	// Only persist to DB if:
+	// - Job completed successfully, OR
+	// - Job failed AND there's no onFailure callback (no retry logic)
+	// If there's an onFailure callback, let it decide whether to persist failed state
+	// (it will retry or persist failure when retries are exhausted)
+	if shouldPersist && !(failed && r.onFailure != nil) {
 		var dbState query.JobState
 		if state == JobStateCompleted {
 			dbState = query.JobStateCompleted
