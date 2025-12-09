@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/rs/zerolog"
 
@@ -270,30 +269,12 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 			Msg("container prune failed (may be nothing to prune)")
 	}
 
-	// Restore from exported checkpoint file with retry.
-	// Podman sometimes takes a moment to fully release container storage after rm,
-	// so we retry a few times with a short delay.
-	var output []byte
-	var err error
-	for attempt := 0; attempt < 3; attempt++ {
-		cmd := exec.CommandContext(ctx, "podman", "container", "restore",
-			"--import", c.exportPath,
-			"--tcp-established",
-		)
-		output, err = cmd.CombinedOutput()
-		if err == nil {
-			break
-		}
-		// If it's an "ID already in use" error, wait and retry
-		if strings.Contains(string(output), "already in use") && attempt < 2 {
-			r.logger.Debug().
-				Int("attempt", attempt+1).
-				Msg("container ID still in use, retrying after delay")
-			time.Sleep(500 * time.Millisecond)
-			continue
-		}
-		break
-	}
+	// Restore from exported checkpoint file
+	cmd := exec.CommandContext(ctx, "podman", "container", "restore",
+		"--import", c.exportPath,
+		"--tcp-established",
+	)
+	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("failed to restore container from checkpoint: %w, output: %s", err, string(output))
 	}

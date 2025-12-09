@@ -456,6 +456,8 @@ func TestCrashRecoveryFullServerCrash(t *testing.T) {
 		DefinitionName:    "full-crash-test",
 		DefinitionVersion: "1.0.0",
 		Params:            json.RawMessage(`{"number": 3, "suspend_duration": "5s"}`),
+		Stdout:            &testLogWriter{t: t, prefix: "[stdout]"},
+		Stderr:            &testLogWriter{t: t, prefix: "[stderr]"},
 	})
 	require.NoError(t, err)
 	t.Logf("Spawned job: %s", jobID)
