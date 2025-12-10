@@ -4,7 +4,15 @@
 #   ./fc-snapshot-test.sh create <dir_with_dockerfile> <kernel>  - Build image, boot VM, snapshot when ready
 #   ./fc-snapshot-test.sh restore <kernel>                       - Restore from snapshot and run
 #
-# Dependencies: buildah, skopeo, umoci, e2fsprogs, firecracker, jq
+# How it works:
+#   CREATE: Boot VM with init that loops reading /dev/vdb (trigger disk) for magic byte 0x01.
+#           Trigger disk starts with 0x00, so init spins. Snapshot taken while spinning.
+#   RESTORE: Load snapshot, swap trigger disk to one with 0x01, resume.
+#            Init sees 0x01, runs the entrypoint, exits.
+#   Why a disk? Filesystem cache is snapshotted too - marker files don't work.
+#            Raw block device reads bypass the cache.
+#
+# Dependencies: buildah, skopeo, umoci, e2fsprogs, firecracker, jq, bc
 
 set -euo pipefail
 
@@ -127,15 +135,22 @@ cmd_create() {
     # Build rootfs from Dockerfile
     build_rootfs "$DIR"
     
-    # Start Firecracker
-    firecracker --api-sock "$SOCKET" --level Error &
-    FC_PID=$!
-    wait_socket
-    
     # Create trigger disk (small disk to signal restore)
     rm -f "$TRIGGER_DISK"
     truncate -s 4K "$TRIGGER_DISK"
     printf '\x00' | dd of="$TRIGGER_DISK" bs=1 count=1 conv=notrunc 2>/dev/null
+    
+    # Create FIFO to capture console output
+    CONSOLE_FIFO="$WORK/console.fifo"
+    mkfifo "$CONSOLE_FIFO"
+    CONSOLE_LOG="$WORK/console.log"
+    cat "$CONSOLE_FIFO" | tee "$CONSOLE_LOG" &
+    TEE_PID=$!
+    
+    # Start Firecracker with output to FIFO
+    firecracker --api-sock "$SOCKET" --level Error > "$CONSOLE_FIFO" 2>&1 &
+    FC_PID=$!
+    wait_socket
     
     # Configure VM
     api "boot-source" "{
@@ -159,9 +174,11 @@ cmd_create() {
     echo "Booting VM..."
     api "actions" '{"action_type":"InstanceStart"}' >/dev/null
     
-    # Wait for SNAPSHOT_READY signal
-    echo "Waiting for VM to be ready..."
-    sleep 2  # Give time for boot + init to reach ready state
+    # Wait for SNAPSHOT_READY signal in console output
+    echo "Waiting for VM to signal ready..."
+    while ! grep -q "===SNAPSHOT_READY===" "$CONSOLE_LOG" 2>/dev/null; do
+        sleep 0.05
+    done
     
     # Pause VM
     echo "Pausing VM..."
