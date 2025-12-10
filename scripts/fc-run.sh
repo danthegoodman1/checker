@@ -30,8 +30,8 @@ buildah bud -t "$IMG" "$DIR" >/dev/null 2>&1
 skopeo copy "containers-storage:localhost/$IMG" "oci:$WORK/oci:latest" >/dev/null
 CONFIG=$(skopeo inspect "oci:$WORK/oci:latest")
 # Debug: show config structure
-echo "DEBUG config.Entrypoint: $(echo "$CONFIG" | jq '.config.Entrypoint')" >&2
-echo "DEBUG config.Cmd: $(echo "$CONFIG" | jq '.config.Cmd')" >&2
+echo "DEBUG keys: $(echo "$CONFIG" | jq 'keys')" >&2
+echo "DEBUG Config: $(echo "$CONFIG" | jq '.Config')" >&2
 WORKDIR=$(echo "$CONFIG" | jq -r '.config.WorkingDir // "/"')
 ENTRYPOINT=$(echo "$CONFIG" | jq -r '(.config.Entrypoint // []) | join(" ")')
 CMD=$(echo "$CONFIG" | jq -r '(.config.Cmd // []) | join(" ")')
