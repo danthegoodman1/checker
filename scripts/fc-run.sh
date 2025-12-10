@@ -79,7 +79,7 @@ api() { curl -s --unix-socket "$SOCKET" -X PUT "http://localhost/$1" -H "Content
 
 api "boot-source" "{\"kernel_image_path\":\"$KERNEL\",\"boot_args\":\"console=ttyS0 reboot=k panic=1 pci=off init=/init\"}"
 api "drives/rootfs" "{\"drive_id\":\"rootfs\",\"path_on_host\":\"$ROOTFS\",\"is_root_device\":true,\"is_read_only\":false}"
-api "machine-config" "{\"vcpu_count\":1,\"mem_size_mib\":128}"
+api "machine-config" "{\"vcpu_count\":1,\"mem_size_mib\":256}"
 api "actions" '{"action_type":"InstanceStart"}' >/dev/null
 
 wait $FC_PID 2>/dev/null
