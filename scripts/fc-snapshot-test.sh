@@ -19,6 +19,7 @@ mkdir -p "$SNAP_DIR"
 SNAPSHOT_FILE="$SNAP_DIR/snapshot"
 MEM_FILE="$SNAP_DIR/mem"
 ROOTFS="$SNAP_DIR/rootfs.ext4"
+TRIGGER_DISK="$SNAP_DIR/trigger.img"
 
 WORK=$(mktemp -d)
 trap "rm -rf $WORK; buildah rm \$(buildah containers -q) &>/dev/null || true" EXIT
@@ -77,26 +78,21 @@ mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev 2>/dev/null || true
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-# Check if this is a snapshot restore (marker file exists)
-if [ -f /.fc_restored ]; then
-    # Restored from snapshot - run the command
-    . /.fc_cmd
-    EXIT_CODE=$?
-    echo "--- exit: $EXIT_CODE ---"
-    reboot -f
-fi
-
 # First boot - signal ready and wait for snapshot
 echo "===SNAPSHOT_READY==="
 
-# Busy-wait checking for restore marker
-# (The snapshot will be taken while we're in this loop)
+# Wait for trigger disk (vdb) to have magic byte 0x01
+# This bypasses filesystem cache issues
 while true; do
-    if [ -f /.fc_restored ]; then
-        . /.fc_cmd
-        EXIT_CODE=$?
-        echo "--- exit: $EXIT_CODE ---"
-        reboot -f
+    # Read first byte from /dev/vdb (trigger disk)
+    if [ -e /dev/vdb ]; then
+        BYTE=$(dd if=/dev/vdb bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' ')
+        if [ "$BYTE" = "01" ]; then
+            . /.fc_cmd
+            EXIT_CODE=$?
+            echo "--- exit: $EXIT_CODE ---"
+            reboot -f
+        fi
     fi
     sleep 0.001
 done
@@ -136,6 +132,11 @@ cmd_create() {
     FC_PID=$!
     wait_socket
     
+    # Create trigger disk (small disk to signal restore)
+    rm -f "$TRIGGER_DISK"
+    truncate -s 4K "$TRIGGER_DISK"
+    printf '\x00' | dd of="$TRIGGER_DISK" bs=1 count=1 conv=notrunc 2>/dev/null
+    
     # Configure VM
     api "boot-source" "{
         \"kernel_image_path\": \"$KERNEL\",
@@ -145,6 +146,12 @@ cmd_create() {
         \"drive_id\": \"rootfs\",
         \"path_on_host\": \"$ROOTFS\",
         \"is_root_device\": true,
+        \"is_read_only\": false
+    }"
+    api "drives/trigger" "{
+        \"drive_id\": \"trigger\",
+        \"path_on_host\": \"$TRIGGER_DISK\",
+        \"is_root_device\": false,
         \"is_read_only\": false
     }"
     api "machine-config" '{"vcpu_count":1,"mem_size_mib":512}'
@@ -193,13 +200,10 @@ cmd_restore() {
     
     echo "=== Restoring from Snapshot ==="
     
-    # Create a fresh copy of rootfs with restore marker
-    RESTORE_ROOTFS="$WORK/rootfs.ext4"
-    cp "$ROOTFS" "$RESTORE_ROOTFS"
-    
-    # Add restore marker file using debugfs
-    echo "restored" > "$WORK/marker"
-    debugfs -w -R "write $WORK/marker /.fc_restored" "$RESTORE_ROOTFS" 2>/dev/null
+    # Create trigger disk with magic byte (0x01 = run)
+    RESTORE_TRIGGER="$WORK/trigger.img"
+    truncate -s 4K "$RESTORE_TRIGGER"
+    printf '\x01' | dd of="$RESTORE_TRIGGER" bs=1 count=1 conv=notrunc 2>/dev/null
     
     # Start Firecracker
     firecracker --api-sock "$SOCKET" --level Error &
@@ -219,10 +223,10 @@ cmd_restore() {
         \"enable_diff_snapshots\": false
     }"
     
-    # Update the drive to use our modified rootfs
-    api_patch "drives/rootfs" "{
-        \"drive_id\": \"rootfs\",
-        \"path_on_host\": \"$RESTORE_ROOTFS\"
+    # Update trigger disk to use our version with magic byte set
+    api_patch "drives/trigger" "{
+        \"drive_id\": \"trigger\",
+        \"path_on_host\": \"$RESTORE_TRIGGER\"
     }"
     
     # Resume
