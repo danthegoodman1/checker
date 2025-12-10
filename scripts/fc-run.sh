@@ -30,8 +30,8 @@ buildah bud -t "$IMG" "$DIR" >/dev/null 2>&1
 skopeo copy "containers-storage:localhost/$IMG" "oci:$WORK/oci:latest" >/dev/null
 CONFIG=$(skopeo inspect --config "oci:$WORK/oci:latest")
 WORKDIR=$(echo "$CONFIG" | jq -r '.config.WorkingDir // "/"')
-ENTRYPOINT=$(echo "$CONFIG" | jq -r '(.config.Entrypoint // []) | join(" ")')
-CMD=$(echo "$CONFIG" | jq -r '(.config.Cmd // []) | join(" ")')
+ENTRYPOINT=$(echo "$CONFIG" | jq -r '(.config.Entrypoint // []) | map(@sh) | join(" ")')
+CMD=$(echo "$CONFIG" | jq -r '(.config.Cmd // []) | map(@sh) | join(" ")')
 ENV_VARS=$(echo "$CONFIG" | jq -r '(.config.Env // []) | .[] | split("=") | "export \(.[0])=\"\(.[1:] | join("="))\"" ')
 
 # Unpack to rootfs
