@@ -1,4 +1,4 @@
-FROM oven/bun:alpine
+FROM docker.io/oven/bun:alpine
 WORKDIR /app
 COPY index.js .
 ENTRYPOINT []

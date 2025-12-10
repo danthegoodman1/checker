@@ -54,7 +54,9 @@ build_rootfs() {
     local IMG="fc-snapshot-$$"
     
     echo "Building image from $DIR..."
-    buildah bud -t "$IMG" "$DIR" >/dev/null 2>&1
+    if ! buildah bud -t "$IMG" "$DIR" >/dev/null; then
+        die "buildah build failed - run 'buildah bud -t test $DIR' to see errors"
+    fi
     
     # Export to OCI layout and extract config
     skopeo copy "containers-storage:localhost/$IMG" "oci:$WORK/oci:latest" >/dev/null
