@@ -205,12 +205,28 @@ cmd_restore() {
     truncate -s 4K "$RESTORE_TRIGGER"
     printf '\x01' | dd of="$RESTORE_TRIGGER" bs=1 count=1 conv=notrunc 2>/dev/null
     
-    # Start Firecracker
-    firecracker --api-sock "$SOCKET" --level Error &
+    # Create a FIFO for capturing output with timestamps
+    FIFO="$WORK/output.fifo"
+    mkfifo "$FIFO"
+    
+    # Background process to add timestamps to each line
+    # Records time relative to when we started
+    (
+        START_TS=$(date +%s.%N)
+        while IFS= read -r line; do
+            NOW=$(date +%s.%N)
+            ELAPSED=$(echo "$NOW - $START_TS" | bc)
+            printf "[+%07.3fs] %s\n" "$ELAPSED" "$line"
+        done < "$FIFO"
+    ) &
+    TS_PID=$!
+    
+    # Start Firecracker with output going to FIFO
+    firecracker --api-sock "$SOCKET" --level Error > "$FIFO" 2>&1 &
     FC_PID=$!
     wait_socket
     
-    # Time the restore
+    # Record start time for API timing
     START_TIME=$(python3 -c 'import time; print(time.time())')
     
     # Restore from snapshot
@@ -229,18 +245,19 @@ cmd_restore() {
         \"path_on_host\": \"$RESTORE_TRIGGER\"
     }"
     
-    # Resume
+    # Resume and record time
     api_patch "vm" '{"state":"Resumed"}'
     
     END_TIME=$(python3 -c 'import time; print(time.time())')
     RESTORE_MS=$(python3 -c "print(f'{($END_TIME - $START_TIME) * 1000:.1f}')")
     
-    echo "Restore + resume time: ${RESTORE_MS}ms"
+    echo "API restore + resume time: ${RESTORE_MS}ms"
     echo ""
-    echo "--- VM Output ---"
+    echo "--- VM Output (timestamped) ---"
     
     # Wait for completion
     wait $FC_PID 2>/dev/null || true
+    wait $TS_PID 2>/dev/null || true
     
     echo ""
     echo "=== Restore Complete ==="
