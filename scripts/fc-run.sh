@@ -50,10 +50,17 @@ mount -t proc proc /proc
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev 2>/dev/null || true
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Seed entropy from multiple sources to unblock /dev/urandom
+(
+  date +%s%N
+  cat /proc/interrupts 2>/dev/null
+  cat /proc/uptime 2>/dev/null
+  cat /proc/meminfo 2>/dev/null
+  head -c 512 /dev/urandom 2>/dev/null
+) | head -c 512 > /dev/urandom 2>/dev/null || true
+
 echo "init starting..."
-echo "checking node..."
-which node
-echo "running node..."
 cd /app
 node index.js 2>&1
 echo "--- exited with code $? ---"
@@ -79,7 +86,7 @@ sleep 0.3
 
 api() { curl -s --unix-socket "$SOCKET" -X PUT "http://localhost/$1" -H "Content-Type: application/json" -d "$2"; }
 
-api "boot-source" "{\"kernel_image_path\":\"$KERNEL\",\"boot_args\":\"console=ttyS0 reboot=k panic=1 pci=off init=/init\"}"
+api "boot-source" "{\"kernel_image_path\":\"$KERNEL\",\"boot_args\":\"console=ttyS0 reboot=k panic=1 pci=off init=/init random.trust_cpu=on\"}"
 api "drives/rootfs" "{\"drive_id\":\"rootfs\",\"path_on_host\":\"$ROOTFS\",\"is_root_device\":true,\"is_read_only\":false}"
 api "machine-config" "{\"vcpu_count\":1,\"mem_size_mib\":512}"
 api "actions" '{"action_type":"InstanceStart"}' >/dev/null
