@@ -3,6 +3,7 @@
 # Usage: fc-run.sh <dir_with_dockerfile> <kernel_path>
 #
 # Dependencies: buildah, skopeo, umoci, e2fsprogs, firecracker, jq
+# curl -fLo vmlinux-5.10.bin "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/x86_64/vmlinux-5.10.223"
 
 set -euo pipefail
 
@@ -43,24 +44,17 @@ mkdir -p "$FS"/{dev,proc,sys,run,tmp}
 [[ ! -s "$FS/etc/resolv.conf" ]] && printf "nameserver 8.8.8.8\n" > "$FS/etc/resolv.conf"
 
 # Generate init from image's ENTRYPOINT/CMD
-# Write a simple init that runs the command
-cat > "$FS/init" << 'EOF'
+cat > "$FS/init" <<EOF
 #!/bin/sh
 mount -t proc proc /proc
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev 2>/dev/null || true
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-
-# Wait for virtio-rng to provide entropy (reads from /dev/hwrng -> /dev/urandom)
-if [ -c /dev/hwrng ]; then
-  echo "seeding entropy from virtio-rng..."
-  dd if=/dev/hwrng of=/dev/urandom bs=512 count=4 2>/dev/null
-fi
-
-echo "init starting..."
-cd /app
-node index.js 2>&1
-echo "--- exited with code $? ---"
+[ -c /dev/hwrng ] && dd if=/dev/hwrng of=/dev/urandom bs=512 count=4 2>/dev/null
+$ENV_VARS
+cd $WORKDIR
+$ENTRYPOINT $CMD
+echo "--- exit: \$? ---"
 reboot -f
 EOF
 chmod +x "$FS/init"
@@ -76,17 +70,17 @@ resize2fs -M "$ROOTFS" &>/dev/null || true
 # Cleanup image
 buildah rmi "$IMG" &>/dev/null || true
 
-# Run Firecracker (stdout/stderr = serial console output)
-firecracker --api-sock "$SOCKET" &
+# Run Firecracker
+firecracker --api-sock "$SOCKET" --level Error &
 FC_PID=$!
 sleep 0.3
 
 api() { curl -s --unix-socket "$SOCKET" -X PUT "http://localhost/$1" -H "Content-Type: application/json" -d "$2"; }
 
-api "boot-source" "{\"kernel_image_path\":\"$KERNEL\",\"boot_args\":\"console=ttyS0 reboot=k panic=1 pci=off init=/init random.trust_cpu=on\"}"
+api "boot-source" "{\"kernel_image_path\":\"$KERNEL\",\"boot_args\":\"console=ttyS0 reboot=k panic=1 pci=off quiet loglevel=0 init=/init\"}"
 api "drives/rootfs" "{\"drive_id\":\"rootfs\",\"path_on_host\":\"$ROOTFS\",\"is_root_device\":true,\"is_read_only\":false}"
 api "machine-config" "{\"vcpu_count\":1,\"mem_size_mib\":512}"
-api "entropy" '{}'  # Enable virtio-rng for entropy from host
+api "entropy" '{}'
 api "actions" '{"action_type":"InstanceStart"}' >/dev/null
 
 wait $FC_PID 2>/dev/null
