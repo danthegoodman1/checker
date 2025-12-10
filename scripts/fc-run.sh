@@ -77,7 +77,7 @@ sleep 0.3
 
 api() { curl -s --unix-socket "$SOCKET" -X PUT "http://localhost/$1" -H "Content-Type: application/json" -d "$2"; }
 
-api "boot-source" "{\"kernel_image_path\":\"$KERNEL\",\"boot_args\":\"console=ttyS0 reboot=k panic=1 pci=off loglevel=0 init=/init\"}"
+api "boot-source" "{\"kernel_image_path\":\"$KERNEL\",\"boot_args\":\"console=ttyS0 reboot=k panic=1 pci=off init=/init\"}"
 api "drives/rootfs" "{\"drive_id\":\"rootfs\",\"path_on_host\":\"$ROOTFS\",\"is_root_device\":true,\"is_read_only\":false}"
 api "machine-config" "{\"vcpu_count\":1,\"mem_size_mib\":512}"
 api "entropy" '{}'
