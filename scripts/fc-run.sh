@@ -51,14 +51,11 @@ mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev 2>/dev/null || true
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-# Seed entropy from multiple sources to unblock /dev/urandom
-(
-  date +%s%N
-  cat /proc/interrupts 2>/dev/null
-  cat /proc/uptime 2>/dev/null
-  cat /proc/meminfo 2>/dev/null
-  head -c 512 /dev/urandom 2>/dev/null
-) | head -c 512 > /dev/urandom 2>/dev/null || true
+# Wait for virtio-rng to provide entropy (reads from /dev/hwrng -> /dev/urandom)
+if [ -c /dev/hwrng ]; then
+  echo "seeding entropy from virtio-rng..."
+  dd if=/dev/hwrng of=/dev/urandom bs=512 count=4 2>/dev/null
+fi
 
 echo "init starting..."
 cd /app
@@ -89,6 +86,7 @@ api() { curl -s --unix-socket "$SOCKET" -X PUT "http://localhost/$1" -H "Content
 api "boot-source" "{\"kernel_image_path\":\"$KERNEL\",\"boot_args\":\"console=ttyS0 reboot=k panic=1 pci=off init=/init random.trust_cpu=on\"}"
 api "drives/rootfs" "{\"drive_id\":\"rootfs\",\"path_on_host\":\"$ROOTFS\",\"is_root_device\":true,\"is_read_only\":false}"
 api "machine-config" "{\"vcpu_count\":1,\"mem_size_mib\":512}"
+api "entropy" '{}'  # Enable virtio-rng for entropy from host
 api "actions" '{"action_type":"InstanceStart"}' >/dev/null
 
 wait $FC_PID 2>/dev/null
