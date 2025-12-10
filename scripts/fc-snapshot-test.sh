@@ -5,8 +5,9 @@
 #   ./fc-snapshot-test.sh restore <kernel>                       - Restore from snapshot and run
 #
 # How it works:
-#   CREATE: Boot VM with init that loops reading /dev/vdb (trigger disk) for magic byte 0x01.
-#           Trigger disk starts with 0x00, so init spins. Snapshot taken while spinning.
+#   CREATE: Boot VM with init that prints "===SNAPSHOT_READY===" then loops reading
+#           /dev/vdb (trigger disk) for magic byte 0x01. Trigger disk has 0x00, so init spins.
+#           Script watches console for SNAPSHOT_READY, then pauses and snapshots.
 #   RESTORE: Load snapshot, swap trigger disk to one with 0x01, resume.
 #            Init sees 0x01, runs the entrypoint, exits.
 #   Why a disk? Filesystem cache is snapshotted too - marker files don't work.
