@@ -80,7 +80,7 @@ api() { curl -s --unix-socket "$SOCKET" -X PUT "http://localhost/$1" -H "Content
 for _ in {1..50}; do [[ -S "$SOCKET" ]] && break; sleep 0.01; done
 
 # Optimized boot args for fast startup
-api "boot-source" "{\"kernel_image_path\":\"$KERNEL\",\"boot_args\":\"console=ttyS0 reboot=k panic=1 pci=off init=/init nomodule audit=0 mitigations=off tsc=reliable no_timer_check noreplace-smp\"}"
+api "boot-source" "{\"kernel_image_path\":\"$KERNEL\",\"boot_args\":\"console=ttyS0 reboot=k panic=1 pci=off init=/init nomodule audit=0 tsc=reliable no_timer_check noreplace-smp 8250.nr_uarts=1 random.trust_cpu=on\"}"
 api "drives/rootfs" "{\"drive_id\":\"rootfs\",\"path_on_host\":\"$ROOTFS\",\"is_root_device\":true,\"is_read_only\":false}"
 api "machine-config" "{\"vcpu_count\":1,\"mem_size_mib\":512}"
 api "entropy" '{}'
