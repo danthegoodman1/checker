@@ -51,8 +51,11 @@ mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev 2>/dev/null || true
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 echo "init starting..."
+echo "checking node..."
+which node
+echo "running node..."
 cd /app
-node index.js
+node index.js 2>&1
 echo "--- exited with code $? ---"
 reboot -f
 EOF
