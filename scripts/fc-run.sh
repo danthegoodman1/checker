@@ -43,6 +43,7 @@ mkdir -p "$FS"/{dev,proc,sys,run,tmp}
 [[ ! -s "$FS/etc/resolv.conf" ]] && printf "nameserver 8.8.8.8\n" > "$FS/etc/resolv.conf"
 
 # Generate init from image's ENTRYPOINT/CMD
+FULL_CMD="$ENTRYPOINT $CMD"
 cat > "$FS/init" << INIT
 #!/bin/sh
 mount -t proc proc /proc
@@ -50,7 +51,8 @@ mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev 2>/dev/null || true
 $ENV_VARS
 cd $WORKDIR
-$ENTRYPOINT $CMD > /dev/console 2>&1
+echo "running: $FULL_CMD"
+$FULL_CMD
 EXIT_CODE=\$?
 echo "--- exited with code \$EXIT_CODE ---"
 reboot -f
