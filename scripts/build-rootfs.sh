@@ -1,7 +1,10 @@
 #!/bin/bash
 # Convert OCI image to Firecracker ext4 rootfs
 # Usage: build-rootfs.sh <image_ref> [output_path]
-# Example: build-rootfs.sh docker://node:20-alpine ./rootfs.ext4
+# Examples:
+#   build-rootfs.sh docker://node:20-alpine ./rootfs.ext4
+#   build-rootfs.sh containers-storage:localhost/my-image:tag  # local podman image
+#   build-rootfs.sh oci-archive:./image.tar                    # exported tarball
 #
 # Dependencies:
 #   - skopeo (install: apt/dnf install skopeo)
