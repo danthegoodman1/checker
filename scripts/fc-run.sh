@@ -50,7 +50,7 @@ mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev 2>/dev/null || true
 $ENV_VARS
 cd $WORKDIR
-$ENTRYPOINT $CMD
+$ENTRYPOINT $CMD > /dev/console 2>&1
 EXIT_CODE=\$?
 echo "--- exited with code \$EXIT_CODE ---"
 reboot -f
