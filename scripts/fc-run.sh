@@ -44,19 +44,15 @@ mkdir -p "$FS"/{dev,proc,sys,run,tmp}
 
 # Generate init from image's ENTRYPOINT/CMD
 FULL_CMD="$ENTRYPOINT $CMD"
-cat > "$FS/init" << INIT
+cat > "$FS/init" << 'INITEOF'
 #!/bin/sh
 mount -t proc proc /proc
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev 2>/dev/null || true
-$ENV_VARS
-cd $WORKDIR
-echo "running: $FULL_CMD" > /dev/console
-$FULL_CMD > /dev/console 2>&1
-EXIT_CODE=\$?
-echo "--- exited with code \$EXIT_CODE ---" > /dev/console
-reboot -f
-INIT
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+INITEOF
+echo "cd $WORKDIR" >> "$FS/init"
+echo "$FULL_CMD; echo \"--- exited with code \$? ---\"; reboot -f" >> "$FS/init"
 chmod +x "$FS/init"
 
 # Create ext4
