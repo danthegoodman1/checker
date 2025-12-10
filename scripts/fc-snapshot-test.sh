@@ -226,7 +226,7 @@ cmd_restore() {
     }"
     
     # Resume
-    api "actions" '{"action_type":"Resume"}'
+    api_patch "vm" '{"state":"Resumed"}'
     
     END_TIME=$(python3 -c 'import time; print(time.time())')
     RESTORE_MS=$(python3 -c "print(f'{($END_TIME - $START_TIME) * 1000:.1f}')")
