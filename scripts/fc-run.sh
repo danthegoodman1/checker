@@ -29,10 +29,14 @@ buildah bud -t "$IMG" "$DIR" >/dev/null 2>&1
 # Export to OCI layout and extract config
 skopeo copy "containers-storage:localhost/$IMG" "oci:$WORK/oci:latest" >/dev/null
 CONFIG=$(skopeo inspect "oci:$WORK/oci:latest")
+# Debug: show config structure
+echo "DEBUG config.Entrypoint: $(echo "$CONFIG" | jq '.config.Entrypoint')" >&2
+echo "DEBUG config.Cmd: $(echo "$CONFIG" | jq '.config.Cmd')" >&2
 WORKDIR=$(echo "$CONFIG" | jq -r '.config.WorkingDir // "/"')
 ENTRYPOINT=$(echo "$CONFIG" | jq -r '(.config.Entrypoint // []) | join(" ")')
 CMD=$(echo "$CONFIG" | jq -r '(.config.Cmd // []) | join(" ")')
 ENV_VARS=$(echo "$CONFIG" | jq -r '(.config.Env // []) | .[] | split("=") | "export \(.[0])=\"\(.[1:] | join("="))\"" ')
+echo "DEBUG ENTRYPOINT='$ENTRYPOINT' CMD='$CMD'" >&2
 
 # Unpack to rootfs
 umoci unpack --image "$WORK/oci:latest" "$WORK/bundle" >/dev/null
