@@ -43,16 +43,19 @@ mkdir -p "$FS"/{dev,proc,sys,run,tmp}
 [[ ! -s "$FS/etc/resolv.conf" ]] && printf "nameserver 8.8.8.8\n" > "$FS/etc/resolv.conf"
 
 # Generate init from image's ENTRYPOINT/CMD
-FULL_CMD="$ENTRYPOINT $CMD"
-cat > "$FS/init" << 'INITEOF'
+# Write a simple init that runs the command
+cat > "$FS/init" << 'EOF'
 #!/bin/sh
 mount -t proc proc /proc
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev 2>/dev/null || true
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-INITEOF
-echo "cd $WORKDIR" >> "$FS/init"
-echo "$FULL_CMD; echo \"--- exited with code \$? ---\"; reboot -f" >> "$FS/init"
+echo "init starting..."
+cd /app
+node index.js
+echo "--- exited with code $? ---"
+reboot -f
+EOF
 chmod +x "$FS/init"
 
 # Create ext4
