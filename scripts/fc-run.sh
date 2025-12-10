@@ -73,12 +73,14 @@ buildah rmi "$IMG" &>/dev/null || true
 # Run Firecracker
 firecracker --api-sock "$SOCKET" --level Error &
 FC_PID=$!
-sleep 0.3
 
 api() { curl -s --unix-socket "$SOCKET" -X PUT "http://localhost/$1" -H "Content-Type: application/json" -d "$2"; }
 
-# after pci=off, add loglevel=0 to quiet the kernel
-api "boot-source" "{\"kernel_image_path\":\"$KERNEL\",\"boot_args\":\"console=ttyS0 reboot=k panic=1 pci=off init=/init\"}"
+# Wait for socket with minimal delay
+for _ in {1..50}; do [[ -S "$SOCKET" ]] && break; sleep 0.01; done
+
+# Optimized boot args for fast startup
+api "boot-source" "{\"kernel_image_path\":\"$KERNEL\",\"boot_args\":\"console=ttyS0 reboot=k panic=1 pci=off init=/init quiet loglevel=0 nomodule audit=0 mitigations=off tsc=reliable no_timer_check noreplace-smp\"}"
 api "drives/rootfs" "{\"drive_id\":\"rootfs\",\"path_on_host\":\"$ROOTFS\",\"is_root_device\":true,\"is_read_only\":false}"
 api "machine-config" "{\"vcpu_count\":1,\"mem_size_mib\":512}"
 api "entropy" '{}'
