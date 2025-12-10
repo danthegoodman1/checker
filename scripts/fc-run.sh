@@ -47,10 +47,13 @@ cat > "$FS/init" << INIT
 #!/bin/sh
 mount -t proc proc /proc
 mount -t sysfs sys /sys
-mount -t devtmpfs dev /dev
+mount -t devtmpfs dev /dev 2>/dev/null || true
 $ENV_VARS
 cd $WORKDIR
-exec $ENTRYPOINT $CMD
+$ENTRYPOINT $CMD
+EXIT_CODE=\$?
+echo "--- exited with code \$EXIT_CODE ---"
+reboot -f
 INIT
 chmod +x "$FS/init"
 
