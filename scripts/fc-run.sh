@@ -51,10 +51,10 @@ mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev 2>/dev/null || true
 $ENV_VARS
 cd $WORKDIR
-echo "running: $FULL_CMD"
-$FULL_CMD
+echo "running: $FULL_CMD" > /dev/console
+$FULL_CMD > /dev/console 2>&1
 EXIT_CODE=\$?
-echo "--- exited with code \$EXIT_CODE ---"
+echo "--- exited with code \$EXIT_CODE ---" > /dev/console
 reboot -f
 INIT
 chmod +x "$FS/init"
