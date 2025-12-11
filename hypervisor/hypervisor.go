@@ -855,10 +855,29 @@ func (h *Hypervisor) recoverJobs(ctx context.Context) error {
 }
 
 // recoverRunningJob handles a job that was in the 'running' state when we crashed.
-// According to the plan, we mark it as failed and auto-retry based on the retry policy.
+// If the job has a checkpoint, we schedule it for resume. Otherwise, we mark it as
+// failed and auto-retry based on the retry policy.
 func (h *Hypervisor) recoverRunningJob(ctx context.Context, dbJob query.Job) error {
 	logger.Info().Str("job_id", dbJob.ID).Msg("recovering running job (was interrupted)")
 
+	// Check if job has a checkpoint we can restore from
+	if dbJob.CheckpointCount > 0 && dbJob.CheckpointPath.Valid && dbJob.CheckpointPath.String != "" {
+		logger.Info().
+			Str("job_id", dbJob.ID).
+			Int32("checkpoint_count", dbJob.CheckpointCount).
+			Str("checkpoint_path", dbJob.CheckpointPath.String).
+			Msg("job has checkpoint, scheduling for resume")
+
+		// Transition to suspended state with immediate resume
+		return query.ReliableExecInTx(ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+			return q.UpdateJobSuspendedForRecovery(ctx, query.UpdateJobSuspendedForRecoveryParams{
+				ID:       dbJob.ID,
+				ResumeAt: sql.NullTime{Time: time.Now(), Valid: true},
+			})
+		})
+	}
+
+	// No checkpoint - fall back to retry logic
 	// Get the job definition to check retry policy
 	jd, err := h.definitions.Get(dbJob.DefinitionName, dbJob.DefinitionVersion)
 	if err != nil {

@@ -352,3 +352,20 @@ func (q *Queries) UpdateJobState(ctx context.Context, arg UpdateJobStateParams) 
 	_, err := q.db.Exec(ctx, updateJobState, arg.ID, arg.State)
 	return err
 }
+
+const updateJobSuspendedForRecovery = `-- name: UpdateJobSuspendedForRecovery :exec
+UPDATE jobs SET
+    state = 'suspended',
+    resume_at = $2
+WHERE id = $1
+`
+
+type UpdateJobSuspendedForRecoveryParams struct {
+	ID       string
+	ResumeAt sql.NullTime
+}
+
+func (q *Queries) UpdateJobSuspendedForRecovery(ctx context.Context, arg UpdateJobSuspendedForRecoveryParams) error {
+	_, err := q.db.Exec(ctx, updateJobSuspendedForRecovery, arg.ID, arg.ResumeAt)
+	return err
+}
