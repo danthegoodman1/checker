@@ -496,10 +496,14 @@ func (r *Runtime) Start(ctx context.Context, opts runtime.StartOptions) (runtime
 		return nil, fmt.Errorf("invalid config type: expected *firecracker.Config, got %T", opts.Config)
 	}
 
+	// Apply defaults to ensure boot_args, vcpu_count, etc. are set
+	cfg = cfg.WithDefaults()
+
 	r.logger.Debug().
 		Str("execution_id", opts.ExecutionID).
 		Str("kernel", cfg.KernelPath).
 		Str("rootfs", cfg.RootfsPath).
+		Str("boot_args", cfg.BootArgs).
 		Msg("starting Firecracker VM")
 
 	// Create work directory for this VM
