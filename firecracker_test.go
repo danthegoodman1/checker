@@ -487,19 +487,3 @@ done
 
 	t.Log("=== Firecracker kill test PASSED ===")
 }
-
-// firecracker.StartOptions wrapper for the test
-type StartOptions = struct {
-	ExecutionID    string
-	Config         *firecracker.Config
-	Stdout         *strings.Builder
-	Stderr         *strings.Builder
-	APIHostAddress string
-}
-
-// firecracker.RestoreOptions wrapper for the test
-type RestoreOptions = struct {
-	Checkpoint interface{ Path() string }
-	Stdout     *strings.Builder
-	Stderr     *strings.Builder
-}
