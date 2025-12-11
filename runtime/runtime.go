@@ -9,9 +9,9 @@ import (
 type RuntimeType string
 
 const (
-	RuntimeTypePodman RuntimeType = "podman"
+	RuntimeTypePodman      RuntimeType = "podman"
+	RuntimeTypeFirecracker RuntimeType = "firecracker"
 	// Future runtime types:
-	// RuntimeTypeFirecracker RuntimeType = "firecracker"
 	// RuntimeTypeBubblewrap RuntimeType = "bubblewrap"
 )
 
