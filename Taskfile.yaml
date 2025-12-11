@@ -53,7 +53,7 @@ tasks:
     silent: true
     cmds:
       # concatenates all migrations but drops the "migrate down" parts
-      - ls migrations/*.sql migrations/*.sql.later | xargs -n1 sed '/^-- +migrate Down/ ,$d' > schema.sql
+      - ls migrations/*.sql migrations/*.sql.later 2>/dev/null | sort | xargs -n1 sed '/^-- +migrate Down/ ,$d' > schema.sql
       # There are a bunch of SQL features that don't matter for SQLC but break their parser
       - sed -i -e 's/ON UPDATE NOW[(][)]//g' schema.sql
       - sed -i -e 's/CREATE DATABASE.*//g' schema.sql

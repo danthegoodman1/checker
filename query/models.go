@@ -16,11 +16,12 @@ import (
 type JobState string
 
 const (
-	JobStatePending   JobState = "pending"
-	JobStateRunning   JobState = "running"
-	JobStateSuspended JobState = "suspended"
-	JobStateCompleted JobState = "completed"
-	JobStateFailed    JobState = "failed"
+	JobStatePending      JobState = "pending"
+	JobStateRunning      JobState = "running"
+	JobStateSuspended    JobState = "suspended"
+	JobStatePendingRetry JobState = "pending_retry"
+	JobStateCompleted    JobState = "completed"
+	JobStateFailed       JobState = "failed"
 )
 
 func (e *JobState) Scan(src interface{}) error {
@@ -74,7 +75,7 @@ type Job struct {
 	CheckpointCount   int32
 	LastCheckpointAt  sql.NullTime
 	RetryCount        int32
-	SuspendUntil      sql.NullTime
+	ResumeAt          sql.NullTime
 	CheckpointPath    sql.NullString
 	RuntimeType       string
 	RuntimeConfig     []byte

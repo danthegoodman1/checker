@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -80,15 +81,45 @@ func (e *testEnv) getJob(jobID string) map[string]any {
 	return job
 }
 
-// testLogWriter writes to t.Log with a prefix
+// testLogWriter writes to t.Log with a prefix, buffering output to log complete lines.
 type testLogWriter struct {
 	t      *testing.T
 	prefix string
+	buf    []byte
+	mu     sync.Mutex
 }
 
 func (w *testLogWriter) Write(p []byte) (n int, err error) {
-	w.t.Logf("%s %s", w.prefix, string(p))
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	w.buf = append(w.buf, p...)
+
+	// Log complete lines
+	for {
+		idx := bytes.IndexByte(w.buf, '\n')
+		if idx < 0 {
+			break
+		}
+		line := string(w.buf[:idx])
+		w.buf = w.buf[idx+1:]
+		if line != "" { // Skip empty lines
+			w.t.Logf("%s %s", w.prefix, line)
+		}
+	}
+
 	return len(p), nil
+}
+
+// Flush logs any remaining buffered content
+func (w *testLogWriter) Flush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if len(w.buf) > 0 {
+		w.t.Logf("%s %s", w.prefix, string(w.buf))
+		w.buf = nil
+	}
 }
 
 // spawnJobWithLogs spawns a job directly via the hypervisor with log writers.

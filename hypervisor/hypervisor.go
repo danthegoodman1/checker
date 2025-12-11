@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -96,18 +97,19 @@ func New(cfg Config) *Hypervisor {
 	h.callerHTTPAddress = cfg.CallerHTTPAddress
 	h.runtimeHTTPAddress = cfg.RuntimeHTTPAddress
 
-	// Set wake poller interval with default
 	if cfg.WakePollerInterval > 0 {
 		h.wakePollerInterval = cfg.WakePollerInterval
 	} else {
 		h.wakePollerInterval = 5 * time.Second
 	}
 
-	// Run migrations
 	migrations.RunMigrations(utils.PG_DSN)
 
 	h.callerHTTPServer = http_server.StartHTTPServer(h.callerHTTPAddress, "", h.RegisterCallerAPI)
 	h.runtimeHTTPServer = http_server.StartHTTPServer(h.runtimeHTTPAddress, "", h.RegisterRuntimeAPI)
+
+	// Start the resume poller for suspended and pending_retry jobs
+	h.startResumePoller()
 
 	return h
 }
@@ -144,7 +146,6 @@ func (h *Hypervisor) RegisterRuntime(rt runtime.Runtime) error {
 // RegisterJobDefinition registers a job definition.
 // Called via caller API
 func (h *Hypervisor) RegisterJobDefinition(ctx context.Context, jd *JobDefinition) error {
-	// Validate that we have a runtime for this job type
 	h.runnersMu.RLock()
 	_, hasRuntime := h.runtimes[jd.RuntimeType]
 	h.runnersMu.RUnlock()
@@ -320,42 +321,7 @@ func (h *Hypervisor) Spawn(ctx context.Context, opts SpawnOptions) (string, erro
 	}
 
 	runner := NewJobRunner(job, jd, rt, jd.Config, h.runtimeHTTPAddress, h.pool, opts.Stdout, opts.Stderr)
-
-	// Set up retry callback
-	runner.SetOnFailure(func(r *JobRunner, exitCode int) {
-		job, _ := r.GetState(r.ctx)
-		maxRetries := 0
-		var retryDelay time.Duration
-		if jd.RetryPolicy != nil {
-			maxRetries = jd.RetryPolicy.MaxRetries
-			if jd.RetryPolicy.RetryDelay != "" {
-				retryDelay, _ = time.ParseDuration(jd.RetryPolicy.RetryDelay)
-			}
-		}
-
-		if job.RetryCount < maxRetries {
-			r.logger.Debug().
-				Int("exit_code", exitCode).
-				Int("retry_count", job.RetryCount+1).
-				Int("max_retries", maxRetries).
-				Dur("retry_delay", retryDelay).
-				Msg("retrying failed job")
-
-			if retryDelay > 0 {
-				time.Sleep(retryDelay)
-			}
-			if err := r.Retry(); err != nil {
-				r.logger.Error().Err(err).Msg("failed to retry job")
-				r.MarkDone()
-			}
-		} else {
-			r.logger.Debug().
-				Int("exit_code", exitCode).
-				Int("retry_count", job.RetryCount).
-				Msg("job failed, no retries remaining")
-			r.MarkFailed()
-		}
-	})
+	h.setupRetryCallback(runner, jd)
 
 	h.runnersMu.Lock()
 	h.runners[jobID] = runner
@@ -373,7 +339,10 @@ func (h *Hypervisor) Spawn(ctx context.Context, opts SpawnOptions) (string, erro
 		<-runner.Done()
 		job, err := runner.GetState(h.ctx)
 		if err != nil {
-			logger.Error().Err(err).Str("job_id", jobID).Msg("failed to get job state for eviction")
+			// Context canceled means hypervisor is shutting down, no need to log
+			if !errors.Is(err, context.Canceled) {
+				logger.Error().Err(err).Str("job_id", jobID).Msg("failed to get job state for eviction")
+			}
 			return
 		}
 		h.maybeEvictJob(jobID, job)
@@ -384,7 +353,6 @@ func (h *Hypervisor) Spawn(ctx context.Context, opts SpawnOptions) (string, erro
 
 // Called via caller API
 func (h *Hypervisor) GetJob(ctx context.Context, id string) (*Job, error) {
-	// Try memory first
 	h.runnersMu.RLock()
 	runner, exists := h.runners[id]
 	h.runnersMu.RUnlock()
@@ -393,7 +361,6 @@ func (h *Hypervisor) GetJob(ctx context.Context, id string) (*Job, error) {
 		return runner.GetState(ctx)
 	}
 
-	// Fall back to DB
 	return h.loadJobFromDB(ctx, id)
 }
 
@@ -423,7 +390,6 @@ func (h *Hypervisor) GetResult(ctx context.Context, id string, wait bool) (*JobR
 	}
 
 	if wait {
-		// Wait for the job to complete
 		select {
 		case <-runner.WaitForResult():
 		case <-ctx.Done():
@@ -595,7 +561,6 @@ func (h *Hypervisor) ListJobs(ctx context.Context, limit int32, cursor string) (
 	var params query.ListJobsParams
 	params.Limit = limit
 
-	// Decode cursor if provided
 	if cursor != "" {
 		c, err := decodeListJobsCursor(cursor)
 		if err != nil {
@@ -636,11 +601,9 @@ func (h *Hypervisor) ListJobs(ctx context.Context, limit int32, cursor string) (
 func (h *Hypervisor) Shutdown(ctx context.Context) error {
 	h.cancel()
 
-	// Stop HTTP servers
 	h.callerHTTPServer.Shutdown(ctx)
 	h.runtimeHTTPServer.Shutdown(ctx)
 
-	// Stop all actors
 	h.runnersMu.RLock()
 	runners := make([]*JobRunner, 0, len(h.runners))
 	for _, runner := range h.runners {
@@ -652,7 +615,6 @@ func (h *Hypervisor) Shutdown(ctx context.Context) error {
 		runner.Stop()
 	}
 
-	// Wait for all actors to finish (with timeout from context)
 	for _, runner := range runners {
 		select {
 		case <-runner.Done():
@@ -681,7 +643,37 @@ func (h *Hypervisor) DevCrash() {
 	h.runtimeHTTPServer.Close()
 }
 
-// maybeEvictJob evicts a job from memory if it's in a terminal state or sleeping for more than 10 seconds.
+// setupRetryCallback configures the retry callback for a job runner based on job definition policy.
+func (h *Hypervisor) setupRetryCallback(runner *JobRunner, jd *JobDefinition) {
+	maxRetries := 0
+	var retryDelay time.Duration
+	if jd.RetryPolicy != nil {
+		maxRetries = jd.RetryPolicy.MaxRetries
+		if jd.RetryPolicy.RetryDelay != "" {
+			retryDelay, _ = time.ParseDuration(jd.RetryPolicy.RetryDelay)
+		}
+	}
+	runner.SetOnFailure(func(job *Job, exitCode int) RetryDecision {
+		if job.RetryCount < maxRetries {
+			logger.Debug().
+				Str("job_id", job.ID).
+				Int("exit_code", exitCode).
+				Int("retry_count", job.RetryCount+1).
+				Int("max_retries", maxRetries).
+				Dur("retry_delay", retryDelay).
+				Msg("retrying failed job")
+			return RetryDecision{ShouldRetry: true, RetryDelay: retryDelay}
+		}
+		logger.Debug().
+			Str("job_id", job.ID).
+			Int("exit_code", exitCode).
+			Int("retry_count", job.RetryCount).
+			Msg("job failed, no retries remaining")
+		return RetryDecision{ShouldRetry: false}
+	})
+}
+
+// maybeEvictJob evicts a job from memory if it's in a terminal state, pending retry, or sleeping for more than 10 seconds.
 // This is safe because the DB is the source of truth - jobs can be reloaded when needed.
 func (h *Hypervisor) maybeEvictJob(jobID string, job *Job) {
 	if job.IsTerminal() {
@@ -693,15 +685,27 @@ func (h *Hypervisor) maybeEvictJob(jobID string, job *Job) {
 		return
 	}
 
-	if job.State == JobStateSuspended && job.SuspendUntil != nil {
-		if time.Until(*job.SuspendUntil) > 10*time.Second {
-			// Evict long-sleeping jobs - the wake poller will reload them
+	if job.State == JobStatePendingRetry {
+		// Evict pending_retry jobs so the resume poller can pick them up
+		h.runnersMu.Lock()
+		delete(h.runners, jobID)
+		h.runnersMu.Unlock()
+		logger.Debug().
+			Str("job_id", jobID).
+			Str("state", string(job.State)).
+			Msg("evicted pending_retry job from memory")
+		return
+	}
+
+	if job.State == JobStateSuspended && job.ResumeAt != nil {
+		if time.Until(*job.ResumeAt) > 10*time.Second {
+			// Evict long-sleeping jobs - the resume poller will reload them
 			h.runnersMu.Lock()
 			delete(h.runners, jobID)
 			h.runnersMu.Unlock()
 			logger.Debug().
 				Str("job_id", jobID).
-				Time("suspend_until", *job.SuspendUntil).
+				Time("resume_at", *job.ResumeAt).
 				Msg("evicted long-sleeping job from memory")
 		}
 	}
@@ -734,7 +738,6 @@ func dbJobToJob(dbJob query.Job) *Job {
 		RetryCount:        int(dbJob.RetryCount),
 	}
 
-	// Parse env from JSON
 	if len(dbJob.Env) > 0 {
 		var env map[string]string
 		if err := json.Unmarshal(dbJob.Env, &env); err == nil {
@@ -762,8 +765,8 @@ func dbJobToJob(dbJob query.Job) *Job {
 	if dbJob.LastCheckpointAt.Valid {
 		job.LastCheckpointAt = &dbJob.LastCheckpointAt.Time
 	}
-	if dbJob.SuspendUntil.Valid {
-		job.SuspendUntil = &dbJob.SuspendUntil.Time
+	if dbJob.ResumeAt.Valid {
+		job.ResumeAt = &dbJob.ResumeAt.Time
 	}
 
 	if dbJob.Error.Valid {
@@ -785,18 +788,13 @@ func dbJobToJob(dbJob query.Job) *Job {
 // RecoverState recovers job definitions and jobs from the database.
 // This should be called after all runtimes have been registered.
 func (h *Hypervisor) RecoverState(ctx context.Context) error {
-	// Recover job definitions first
 	if err := h.recoverJobDefinitions(ctx); err != nil {
 		return fmt.Errorf("failed to recover job definitions: %w", err)
 	}
 
-	// Recover jobs
 	if err := h.recoverJobs(ctx); err != nil {
 		return fmt.Errorf("failed to recover jobs: %w", err)
 	}
-
-	// Start the wake poller for suspended jobs
-	h.startWakePoller()
 
 	return nil
 }
@@ -818,7 +816,6 @@ func (h *Hypervisor) recoverJobs(ctx context.Context) error {
 	for _, dbJob := range dbJobs {
 		switch query.JobState(dbJob.State) {
 		case query.JobStateRunning:
-			// Job was running when we crashed - mark as failed and potentially retry
 			if err := h.recoverRunningJob(ctx, dbJob); err != nil {
 				logger.Error().
 					Err(err).
@@ -826,15 +823,14 @@ func (h *Hypervisor) recoverJobs(ctx context.Context) error {
 					Msg("failed to recover running job")
 			}
 
-		case query.JobStateSuspended:
-			// For crash recovery, let the wake poller handle all suspended jobs.
+		case query.JobStateSuspended, query.JobStatePendingRetry:
+			// For crash recovery, let the resume poller handle suspended and pending_retry jobs.
 			logger.Info().
 				Str("job_id", dbJob.ID).
-				Time("suspend_until", dbJob.SuspendUntil.Time).
-				Msg("suspended job will be handled by wake poller")
+				Time("resume_at", dbJob.ResumeAt.Time).
+				Msg("job will be handled by resume poller")
 
 		case query.JobStatePending:
-			// Job was pending - restart it
 			if err := h.restartPendingJob(ctx, dbJob); err != nil {
 				logger.Error().
 					Err(err).
@@ -848,25 +844,32 @@ func (h *Hypervisor) recoverJobs(ctx context.Context) error {
 }
 
 // recoverRunningJob handles a job that was in the 'running' state when we crashed.
-// According to the plan, we mark it as failed and auto-retry based on the retry policy.
+// If the job has a checkpoint, we restore from it immediately. Otherwise, we mark it as
+// failed and auto-retry based on the retry policy.
 func (h *Hypervisor) recoverRunningJob(ctx context.Context, dbJob query.Job) error {
 	logger.Info().Str("job_id", dbJob.ID).Msg("recovering running job (was interrupted)")
 
-	// Get the job definition to check retry policy
+	if dbJob.CheckpointCount > 0 && dbJob.CheckpointPath.Valid && dbJob.CheckpointPath.String != "" {
+		logger.Info().
+			Str("job_id", dbJob.ID).
+			Int32("checkpoint_count", dbJob.CheckpointCount).
+			Str("checkpoint_path", dbJob.CheckpointPath.String).
+			Msg("job has checkpoint, restoring immediately")
+
+		return h.wakeJob(ctx, dbJob)
+	}
+
 	jd, err := h.definitions.Get(dbJob.DefinitionName, dbJob.DefinitionVersion)
 	if err != nil {
-		// No definition - just mark as failed
 		return h.markJobAsFailed(ctx, dbJob.ID, "interrupted: job definition not found")
 	}
 
-	// Check if we should retry
 	maxRetries := 0
 	if jd.RetryPolicy != nil {
 		maxRetries = jd.RetryPolicy.MaxRetries
 	}
 
 	if int(dbJob.RetryCount) < maxRetries {
-		// Retry the job
 		logger.Info().
 			Str("job_id", dbJob.ID).
 			Int("retry_count", int(dbJob.RetryCount)+1).
@@ -875,7 +878,6 @@ func (h *Hypervisor) recoverRunningJob(ctx context.Context, dbJob query.Job) err
 		return h.restartPendingJob(ctx, dbJob)
 	}
 
-	// No retries left - mark as failed
 	return h.markJobAsFailed(ctx, dbJob.ID, "interrupted: no retries remaining")
 }
 
@@ -898,41 +900,7 @@ func (h *Hypervisor) restartPendingJob(ctx context.Context, dbJob query.Job) err
 	job := dbJobToJob(dbJob)
 
 	runner := NewJobRunner(job, jd, rt, jd.Config, h.runtimeHTTPAddress, h.pool, nil, nil)
-
-	runner.SetOnFailure(func(r *JobRunner, exitCode int) {
-		job, _ := r.GetState(r.ctx)
-		maxRetries := 0
-		var retryDelay time.Duration
-		if jd.RetryPolicy != nil {
-			maxRetries = jd.RetryPolicy.MaxRetries
-			if jd.RetryPolicy.RetryDelay != "" {
-				retryDelay, _ = time.ParseDuration(jd.RetryPolicy.RetryDelay)
-			}
-		}
-
-		if job.RetryCount < maxRetries {
-			r.logger.Debug().
-				Int("exit_code", exitCode).
-				Int("retry_count", job.RetryCount+1).
-				Int("max_retries", maxRetries).
-				Dur("retry_delay", retryDelay).
-				Msg("retrying failed job")
-
-			if retryDelay > 0 {
-				time.Sleep(retryDelay)
-			}
-			if err := r.Retry(); err != nil {
-				r.logger.Error().Err(err).Msg("failed to retry job")
-				r.MarkDone()
-			}
-		} else {
-			r.logger.Debug().
-				Int("exit_code", exitCode).
-				Int("retry_count", job.RetryCount).
-				Msg("job failed, no retries remaining")
-			r.MarkFailed()
-		}
-	})
+	h.setupRetryCallback(runner, jd)
 
 	h.runnersMu.Lock()
 	h.runners[dbJob.ID] = runner
@@ -945,98 +913,10 @@ func (h *Hypervisor) restartPendingJob(ctx context.Context, dbJob query.Job) err
 		return fmt.Errorf("failed to start job: %w", err)
 	}
 
-	// Start eviction goroutine
 	go func() {
 		<-runner.Done()
 		job, err := runner.GetState(h.ctx)
 		if err != nil {
-			return
-		}
-		h.maybeEvictJob(dbJob.ID, job)
-	}()
-
-	return nil
-}
-
-// scheduleJobWake loads a suspended job into memory and schedules its wake.
-func (h *Hypervisor) scheduleJobWake(ctx context.Context, dbJob query.Job) error {
-	logger.Info().
-		Str("job_id", dbJob.ID).
-		Time("suspend_until", dbJob.SuspendUntil.Time).
-		Msg("scheduling job wake")
-
-	jd, err := h.definitions.Get(dbJob.DefinitionName, dbJob.DefinitionVersion)
-	if err != nil {
-		return fmt.Errorf("job definition not found: %w", err)
-	}
-
-	h.runnersMu.RLock()
-	rt, exists := h.runtimes[jd.RuntimeType]
-	h.runnersMu.RUnlock()
-	if !exists {
-		return fmt.Errorf("runtime %q not found", jd.RuntimeType)
-	}
-
-	job := dbJobToJob(dbJob)
-
-	if !dbJob.CheckpointPath.Valid || dbJob.CheckpointPath.String == "" {
-		return fmt.Errorf("no checkpoint path for suspended job")
-	}
-
-	checkpoint, err := rt.ReconstructCheckpoint(
-		dbJob.CheckpointPath.String,
-		dbJob.ID,
-		job.Env,
-		jd.Config,
-		h.runtimeHTTPAddress,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to reconstruct checkpoint: %w", err)
-	}
-
-	runner := NewJobRunner(job, jd, rt, jd.Config, h.runtimeHTTPAddress, h.pool, nil, nil)
-	runner.checkpoint = checkpoint
-
-	runner.SetOnFailure(func(r *JobRunner, exitCode int) {
-		job, _ := r.GetState(r.ctx)
-		maxRetries := 0
-		var retryDelay time.Duration
-		if jd.RetryPolicy != nil {
-			maxRetries = jd.RetryPolicy.MaxRetries
-			if jd.RetryPolicy.RetryDelay != "" {
-				retryDelay, _ = time.ParseDuration(jd.RetryPolicy.RetryDelay)
-			}
-		}
-
-		if job.RetryCount < maxRetries {
-			if retryDelay > 0 {
-				time.Sleep(retryDelay)
-			}
-			if err := r.Retry(); err != nil {
-				r.logger.Error().Err(err).Msg("failed to retry job")
-				r.MarkDone()
-			}
-		} else {
-			r.logger.Debug().
-				Int("exit_code", exitCode).
-				Int("retry_count", job.RetryCount).
-				Msg("job failed, no retries remaining")
-			r.MarkFailed()
-		}
-	})
-
-	h.runnersMu.Lock()
-	h.runners[dbJob.ID] = runner
-	h.runnersMu.Unlock()
-
-	runner.scheduleSuspendWake(dbJob.SuspendUntil.Time)
-
-	// Start eviction goroutine
-	go func() {
-		<-runner.Done()
-		job, err := runner.GetState(h.ctx)
-		if err != nil {
-			logger.Error().Err(err).Str("job_id", dbJob.ID).Msg("failed to get job state for eviction")
 			return
 		}
 		h.maybeEvictJob(dbJob.ID, job)
@@ -1071,7 +951,6 @@ func (h *Hypervisor) recoverJobDefinitions(ctx context.Context) error {
 	}
 
 	for _, dbDef := range dbDefs {
-		// Check if we have a runtime for this definition
 		rtType := runtime.RuntimeType(dbDef.RuntimeType)
 		h.runnersMu.RLock()
 		rt, hasRuntime := h.runtimes[rtType]
@@ -1147,36 +1026,36 @@ func (h *Hypervisor) recoverJobDefinitions(ctx context.Context) error {
 	return nil
 }
 
-// startWakePoller starts a background goroutine that polls for suspended jobs to wake.
-func (h *Hypervisor) startWakePoller() {
+// startResumePoller starts a background goroutine that polls for jobs to resume (suspended or pending_retry).
+func (h *Hypervisor) startResumePoller() {
 	ticker := time.NewTicker(h.wakePollerInterval)
 	go func() {
 		for {
 			select {
 			case <-ticker.C:
-				h.wakeReadyJobs()
+				h.resumeReadyJobs()
 			case <-h.ctx.Done():
 				ticker.Stop()
 				return
 			}
 		}
 	}()
-	logger.Info().Msg("started wake poller")
+	logger.Info().Msg("started resume poller")
 }
 
-// wakeReadyJobs queries for suspended jobs that are ready to wake and restores them.
-func (h *Hypervisor) wakeReadyJobs() {
+// resumeReadyJobs queries for suspended and pending_retry jobs that are ready to resume.
+func (h *Hypervisor) resumeReadyJobs() {
 	var dbJobs []query.Job
 	err := query.ReliableExec(h.ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 		var err error
-		dbJobs, err = q.GetSuspendedJobsToWake(ctx, query.GetSuspendedJobsToWakeParams{
-			SuspendUntil: utils.SQLNullTime(time.Now()),
-			Limit:        100, // Process in batches
+		dbJobs, err = q.GetJobsToResume(ctx, query.GetJobsToResumeParams{
+			ResumeAt: utils.SQLNullTime(time.Now()),
+			Limit:    100, // Process in batches
 		})
 		return err
 	})
 	if err != nil {
-		logger.Error().Err(err).Msg("failed to query suspended jobs to wake")
+		logger.Error().Err(err).Msg("failed to query jobs to resume")
 		return
 	}
 
@@ -1189,11 +1068,21 @@ func (h *Hypervisor) wakeReadyJobs() {
 			continue
 		}
 
-		if err := h.wakeJob(h.ctx, dbJob); err != nil {
-			logger.Error().
-				Err(err).
-				Str("job_id", dbJob.ID).
-				Msg("failed to wake suspended job")
+		switch dbJob.State {
+		case query.JobStateSuspended:
+			if err := h.wakeJob(h.ctx, dbJob); err != nil {
+				logger.Error().
+					Err(err).
+					Str("job_id", dbJob.ID).
+					Msg("failed to wake suspended job")
+			}
+		case query.JobStatePendingRetry:
+			if err := h.retryJob(h.ctx, dbJob); err != nil {
+				logger.Error().
+					Err(err).
+					Str("job_id", dbJob.ID).
+					Msg("failed to retry pending job")
+			}
 		}
 	}
 }
@@ -1215,6 +1104,9 @@ func (h *Hypervisor) wakeJob(ctx context.Context, dbJob query.Job) error {
 	}
 
 	job := dbJobToJob(dbJob)
+
+	// Ensure job state is suspended for wake to work (may be 'running' if crashed mid-execution)
+	job.State = JobStateSuspended
 
 	if !dbJob.CheckpointPath.Valid || dbJob.CheckpointPath.String == "" {
 		return fmt.Errorf("no checkpoint path for suspended job")
@@ -1249,77 +1141,34 @@ func (h *Hypervisor) wakeJob(ctx context.Context, dbJob query.Job) error {
 	}
 
 	runner := NewJobRunner(job, jd, rt, jd.Config, h.runtimeHTTPAddress, h.pool, nil, nil)
-	runner.checkpoint = checkpoint
+	runner.SetCheckpoint(checkpoint)
+	h.setupRetryCallback(runner, jd)
 
-	runner.SetOnFailure(func(r *JobRunner, exitCode int) {
-		job, _ := r.GetState(r.ctx)
-		maxRetries := 0
-		var retryDelay time.Duration
-		if jd.RetryPolicy != nil {
-			maxRetries = jd.RetryPolicy.MaxRetries
-			if jd.RetryPolicy.RetryDelay != "" {
-				retryDelay, _ = time.ParseDuration(jd.RetryPolicy.RetryDelay)
-			}
-		}
-
-		if job.RetryCount < maxRetries {
-			r.logger.Debug().
-				Int("exit_code", exitCode).
-				Int("retry_count", job.RetryCount+1).
-				Int("max_retries", maxRetries).
-				Dur("retry_delay", retryDelay).
-				Msg("retrying failed job")
-
-			if retryDelay > 0 {
-				time.Sleep(retryDelay)
-			}
-			if err := r.Retry(); err != nil {
-				r.logger.Error().Err(err).Msg("failed to retry job")
-				r.MarkDone()
-			}
-		} else {
-			r.logger.Debug().
-				Int("exit_code", exitCode).
-				Int("retry_count", job.RetryCount).
-				Msg("job failed, no retries remaining")
-			r.MarkFailed()
-		}
-	})
-
-	// Add to runners map BEFORE restore so that checkpoint requests from the
-	// restored container can find the runner. The Checkpoint method will wait
-	// for process to be set via the processReady channel.
+	// Add to runners map BEFORE sending wake command
 	h.runnersMu.Lock()
 	h.runners[dbJob.ID] = runner
 	h.runnersMu.Unlock()
 
-	process, err := rt.Restore(ctx, runtime.RestoreOptions{
-		Checkpoint: checkpoint,
-		Stdout:     os.Stdout, // TODO: Support stdout/stderr for restored jobs
-		Stderr:     os.Stderr,
-	})
-	if err != nil {
-		// Cancel runner context to unblock any pending checkpoint requests
-		runner.Cancel()
+	resultChan := make(chan commandResult, 1)
+	runner.cmdChan <- command{typ: cmdWake, ctx: ctx, resultChan: resultChan}
 
+	select {
+	case result := <-resultChan:
+		if result.err != nil {
+			// Cancel runner and remove from map
+			runner.Cancel()
+			h.runnersMu.Lock()
+			delete(h.runners, dbJob.ID)
+			h.runnersMu.Unlock()
+			return fmt.Errorf("failed to wake job: %w", result.err)
+		}
+	case <-ctx.Done():
+		runner.Cancel()
 		h.runnersMu.Lock()
 		delete(h.runners, dbJob.ID)
 		h.runnersMu.Unlock()
-
-		runner.persistJobCompleted(query.JobStateFailed, utils.Ptr(time.Now()), nil, fmt.Sprintf("failed to restore: %v", err))
-		return fmt.Errorf("failed to restore from checkpoint: %w", err)
+		return ctx.Err()
 	}
-
-	runner.process = process
-	runner.signalProcessReady()
-
-	runner.jobMu.Lock()
-	runner.job.State = JobStateRunning
-	runner.job.SuspendUntil = nil
-	runner.jobMu.Unlock()
-	runner.persistJobState(query.JobStateRunning)
-
-	go runner.waitForExit()
 
 	go func() {
 		<-runner.Done()
@@ -1332,5 +1181,80 @@ func (h *Hypervisor) wakeJob(ctx context.Context, dbJob query.Job) error {
 	}()
 
 	logger.Info().Str("job_id", dbJob.ID).Msg("successfully woke suspended job")
+	return nil
+}
+
+// retryJob retries a pending_retry job from its checkpoint (if available) or from scratch.
+func (h *Hypervisor) retryJob(ctx context.Context, dbJob query.Job) error {
+	logger.Info().Str("job_id", dbJob.ID).Int("retry_count", int(dbJob.RetryCount)).Msg("retrying job from poller")
+
+	jd, err := h.definitions.Get(dbJob.DefinitionName, dbJob.DefinitionVersion)
+	if err != nil {
+		return h.markJobAsFailed(ctx, dbJob.ID, fmt.Sprintf("job definition not found: %v", err))
+	}
+
+	h.runnersMu.RLock()
+	rt, exists := h.runtimes[jd.RuntimeType]
+	h.runnersMu.RUnlock()
+	if !exists {
+		return h.markJobAsFailed(ctx, dbJob.ID, fmt.Sprintf("runtime %q not found", jd.RuntimeType))
+	}
+
+	job := dbJobToJob(dbJob)
+	job.State = JobStateFailed
+
+	runner := NewJobRunner(job, jd, rt, jd.Config, h.runtimeHTTPAddress, h.pool, nil, nil)
+	h.setupRetryCallback(runner, jd)
+
+	if dbJob.CheckpointPath.Valid && dbJob.CheckpointPath.String != "" {
+		checkpoint, err := rt.ReconstructCheckpoint(
+			dbJob.CheckpointPath.String,
+			dbJob.ID,
+			job.Env,
+			jd.Config,
+			h.runtimeHTTPAddress,
+		)
+		if err != nil {
+			logger.Warn().Err(err).Str("job_id", dbJob.ID).Msg("failed to reconstruct checkpoint, will retry from scratch")
+		} else {
+			runner.SetCheckpoint(checkpoint)
+		}
+	}
+
+	h.runnersMu.Lock()
+	h.runners[dbJob.ID] = runner
+	h.runnersMu.Unlock()
+
+	resultChan := make(chan commandResult, 1)
+	runner.cmdChan <- command{typ: cmdRetry, ctx: ctx, resultChan: resultChan}
+
+	select {
+	case result := <-resultChan:
+		if result.err != nil {
+			runner.Cancel()
+			h.runnersMu.Lock()
+			delete(h.runners, dbJob.ID)
+			h.runnersMu.Unlock()
+			return fmt.Errorf("failed to retry job: %w", result.err)
+		}
+	case <-ctx.Done():
+		runner.Cancel()
+		h.runnersMu.Lock()
+		delete(h.runners, dbJob.ID)
+		h.runnersMu.Unlock()
+		return ctx.Err()
+	}
+
+	go func() {
+		<-runner.Done()
+		job, err := runner.GetState(h.ctx)
+		if err != nil {
+			logger.Error().Err(err).Str("job_id", dbJob.ID).Msg("failed to get job state for eviction")
+			return
+		}
+		h.maybeEvictJob(dbJob.ID, job)
+	}()
+
+	logger.Info().Str("job_id", dbJob.ID).Msg("successfully retried job")
 	return nil
 }

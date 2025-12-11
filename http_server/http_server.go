@@ -162,6 +162,12 @@ func LoggerMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 			c.Error(err)
 		}
 		stop := time.Since(start)
+
+		// Skip logging for context canceled (client disconnected)
+		if c.Request().Context().Err() == context.Canceled {
+			return nil
+		}
+
 		// Log otherwise
 		logger := zerolog.Ctx(c.Request().Context())
 		req := c.Request()

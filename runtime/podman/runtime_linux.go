@@ -213,10 +213,6 @@ func (r *Runtime) Type() runtime.RuntimeType {
 	return runtime.RuntimeTypePodman
 }
 
-func (r *Runtime) CheckpointGracePeriodMs() int64 {
-	return 100
-}
-
 func (r *Runtime) ParseConfig(raw []byte) (any, error) {
 	var cfg Config
 	if err := json.Unmarshal(raw, &cfg); err != nil {

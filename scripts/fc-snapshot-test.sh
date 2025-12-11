@@ -256,7 +256,7 @@ cmd_restore() {
             \"backend_type\": \"File\",
             \"backend_path\": \"$MEM_FILE\"
         },
-        \"enable_diff_snapshots\": false
+        \"track_dirty_pages\": false
     }"
     
     # Update trigger disk to use our version with magic byte set

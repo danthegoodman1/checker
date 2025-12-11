@@ -68,10 +68,10 @@ func NewLogger() zerolog.Logger {
 	}
 	if os.Getenv("TRACE") == "1" {
 		zerolog.SetGlobalLevel(zerolog.TraceLevel)
-	} else if os.Getenv("DEBUG") == "1" {
-		zerolog.SetGlobalLevel(zerolog.DebugLevel)
-	} else {
+	} else if os.Getenv("DEBUG") == "0" {
 		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	} else {
+		zerolog.SetGlobalLevel(zerolog.DebugLevel)
 	}
 
 	return logger
