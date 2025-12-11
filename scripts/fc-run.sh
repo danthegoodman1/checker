@@ -1,0 +1,90 @@
+#!/bin/bash
+# Build Dockerfile and run in Firecracker, capturing output.
+# Usage: fc-run.sh <dir_with_dockerfile> <kernel_path>
+#
+# Dependencies: buildah, skopeo, umoci, e2fsprogs, firecracker, jq
+# curl -fLo vmlinux-5.10.bin "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/x86_64/vmlinux-5.10.223"
+
+set -euo pipefail
+
+die() { echo "error: $1" >&2; exit 1; }
+
+DIR="${1:-}"
+KERNEL="${2:-}"
+
+[[ -z "$DIR" || -z "$KERNEL" ]] && die "usage: $0 <dir_with_dockerfile> <kernel_path>"
+[[ ! -f "$DIR/Dockerfile" ]] && die "no Dockerfile in $DIR"
+[[ ! -f "$KERNEL" ]] && die "kernel not found: $KERNEL"
+command -v jq &>/dev/null || die "jq not found"
+
+WORK=$(mktemp -d)
+trap "rm -rf $WORK; buildah rm \$(buildah containers -q) &>/dev/null || true" EXIT
+
+ROOTFS="$WORK/rootfs.ext4"
+SOCKET="$WORK/fc.sock"
+IMG="fc-run-$$"
+
+# Build image
+buildah bud -t "$IMG" "$DIR" >/dev/null 2>&1
+
+# Export to OCI layout and extract config
+skopeo copy "containers-storage:localhost/$IMG" "oci:$WORK/oci:latest" >/dev/null
+CONFIG=$(skopeo inspect --config "oci:$WORK/oci:latest")
+WORKDIR=$(echo "$CONFIG" | jq -r '.config.WorkingDir // "/"')
+ENTRYPOINT=$(echo "$CONFIG" | jq -r '(.config.Entrypoint // []) | map(@sh) | join(" ")')
+CMD=$(echo "$CONFIG" | jq -r '(.config.Cmd // []) | map(@sh) | join(" ")')
+ENV_VARS=$(echo "$CONFIG" | jq -r '(.config.Env // []) | .[] | split("=") | "export \(.[0])=\"\(.[1:] | join("="))\"" ')
+
+# Unpack to rootfs
+umoci unpack --image "$WORK/oci:latest" "$WORK/bundle" >/dev/null
+FS="$WORK/bundle/rootfs"
+
+# Prepare for Firecracker
+mkdir -p "$FS"/{dev,proc,sys,run,tmp}
+[[ ! -s "$FS/etc/resolv.conf" ]] && printf "nameserver 8.8.8.8\n" > "$FS/etc/resolv.conf"
+
+# Generate init from image's ENTRYPOINT/CMD
+cat > "$FS/init" <<EOF
+#!/bin/sh
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev 2>/dev/null || true
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+[ -c /dev/hwrng ] && dd if=/dev/hwrng of=/dev/urandom bs=512 count=4 2>/dev/null
+$ENV_VARS
+cd $WORKDIR
+$ENTRYPOINT $CMD
+echo "--- exit: \$? ---"
+reboot -f
+EOF
+chmod +x "$FS/init"
+
+# Create ext4
+SIZE_MB=$(( $(du -sm "$FS" | cut -f1) * 2 ))
+[[ $SIZE_MB -lt 64 ]] && SIZE_MB=64
+truncate -s "${SIZE_MB}M" "$ROOTFS"
+mkfs.ext4 -F -L rootfs -O ^metadata_csum,^64bit -d "$FS" "$ROOTFS" >/dev/null
+e2fsck -fy "$ROOTFS" &>/dev/null || true
+resize2fs -M "$ROOTFS" &>/dev/null || true
+
+# Cleanup image
+buildah rmi "$IMG" &>/dev/null || true
+
+# Run Firecracker
+firecracker --api-sock "$SOCKET" --level Error &
+FC_PID=$!
+
+api() { curl -s --unix-socket "$SOCKET" -X PUT "http://localhost/$1" -H "Content-Type: application/json" -d "$2"; }
+
+# Wait for socket with minimal delay
+for _ in {1..50}; do [[ -S "$SOCKET" ]] && break; sleep 0.01; done
+
+# Optimized boot args for fast startup
+api "boot-source" "{\"kernel_image_path\":\"$KERNEL\",\"boot_args\":\"console=ttyS0 reboot=k panic=1 pci=off init=/init nomodule audit=0 tsc=reliable no_timer_check noreplace-smp 8250.nr_uarts=1 random.trust_cpu=on\"}"
+api "drives/rootfs" "{\"drive_id\":\"rootfs\",\"path_on_host\":\"$ROOTFS\",\"is_root_device\":true,\"is_read_only\":false}"
+api "machine-config" "{\"vcpu_count\":1,\"mem_size_mib\":512}"
+api "entropy" '{}'
+api "actions" '{"action_type":"InstanceStart"}' >/dev/null
+
+wait $FC_PID 2>/dev/null
+echo "exit_code: $?"
