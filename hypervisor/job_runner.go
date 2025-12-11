@@ -374,7 +374,7 @@ func (r *JobRunner) handleCheckpoint(cmd command) {
 	}
 
 	// If already checkpointing, collapse this request
-	if r.job.State == JobStateCheckpointing {
+	if r.job.CurrentOperation == JobOpCheckpointing {
 		r.logger.Debug().Str("token", cmd.token).Msg("checkpoint already in progress, collapsing request")
 		r.pendingCheckpointRequests = append(r.pendingCheckpointRequests, cmd.resultChan)
 		return
@@ -395,7 +395,8 @@ func (r *JobRunner) handleCheckpoint(cmd command) {
 		return
 	}
 
-	r.job.State = JobStateCheckpointing
+	r.job.CurrentOperation = JobOpCheckpointing
+	r.persistJobOperation(JobOpCheckpointing)
 	keepRunning := cmd.suspendDuration == 0
 
 	// Update state before stopping container
@@ -410,7 +411,7 @@ func (r *JobRunner) handleCheckpoint(cmd command) {
 	checkpoint, err := r.process.Checkpoint(cmd.ctx, keepRunning)
 	if err != nil {
 		r.job.CheckpointCount--
-		r.job.State = JobStateRunning
+		r.job.CurrentOperation = ""
 		r.job.ResumeAt = nil
 
 		checkpointErr := fmt.Errorf("checkpoint failed: %w", err)
@@ -429,10 +430,9 @@ func (r *JobRunner) handleCheckpoint(cmd command) {
 
 	r.checkpoint = checkpoint
 	r.checkpointTokens[cmd.token] = struct{}{}
+	r.job.CurrentOperation = ""
 
-	if keepRunning {
-		r.job.State = JobStateRunning
-	} else {
+	if !keepRunning {
 		r.job.State = JobStateSuspended
 	}
 
@@ -557,7 +557,8 @@ func (r *JobRunner) handleKill(cmd command) {
 		return
 	}
 
-	r.job.State = JobStateTerminating
+	r.job.CurrentOperation = JobOpTerminating
+	r.persistJobOperation(JobOpTerminating)
 
 	// For suspended jobs, we don't have a running process to kill
 	if r.process != nil {
@@ -599,7 +600,7 @@ func (r *JobRunner) handleExit(cmd command) {
 		return
 	}
 
-	r.job.State = JobStateExiting
+	r.job.CurrentOperation = JobOpExiting
 
 	var errorMsg string
 	if cmd.exitCode == 0 {
@@ -706,7 +707,8 @@ func (r *JobRunner) handleRetry(cmd command) {
 		return
 	}
 
-	r.job.State = JobStateRestarting
+	r.job.CurrentOperation = JobOpRestarting
+	r.persistJobOperation(JobOpRestarting)
 	r.job.RetryCount++
 	r.job.Error = ""
 	r.job.Result = nil
@@ -1149,5 +1151,16 @@ func (r *JobRunner) persistJobState(state query.JobState) {
 		})
 	}); dbErr != nil {
 		r.logger.Error().Err(dbErr).Msg("failed to persist job state to DB")
+	}
+}
+
+func (r *JobRunner) persistJobOperation(op JobOperation) {
+	if dbErr := query.ReliableExecInTx(r.ctx, r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		return q.UpdateJobOperation(ctx, query.UpdateJobOperationParams{
+			ID:               r.job.ID,
+			CurrentOperation: query.NullJobOperation{JobOperation: query.JobOperation(op), Valid: true},
+		})
+	}); dbErr != nil {
+		r.logger.Error().Err(dbErr).Msg("failed to persist job operation to DB")
 	}
 }

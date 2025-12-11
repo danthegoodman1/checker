@@ -1,14 +1,17 @@
 -- name: InsertJob :exec
 INSERT INTO jobs (
     id, definition_name, definition_version, state, env, params,
-    created_at, runtime_type, runtime_config, metadata
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);
+    created_at, runtime_type, runtime_config, metadata, current_operation
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);
 
 -- name: UpdateJobState :exec
-UPDATE jobs SET state = $2 WHERE id = $1;
+UPDATE jobs SET state = $2, current_operation = NULL WHERE id = $1;
+
+-- name: UpdateJobOperation :exec
+UPDATE jobs SET current_operation = $2 WHERE id = $1;
 
 -- name: UpdateJobStarted :exec
-UPDATE jobs SET state = 'running', started_at = $2 WHERE id = $1;
+UPDATE jobs SET state = 'running', started_at = $2, current_operation = NULL WHERE id = $1;
 
 -- name: UpdateJobCheckpointed :exec
 UPDATE jobs SET
@@ -16,7 +19,8 @@ UPDATE jobs SET
     checkpoint_count = checkpoint_count + 1,
     last_checkpoint_at = $3,
     resume_at = $4,
-    checkpoint_path = $5
+    checkpoint_path = $5,
+    current_operation = NULL
 WHERE id = $1;
 
 -- name: UpdateJobCompleted :exec
@@ -25,7 +29,8 @@ UPDATE jobs SET
     completed_at = $3,
     result_exit_code = $4,
     result_output = $5,
-    error = $6
+    error = $6,
+    current_operation = NULL
 WHERE id = $1;
 
 -- name: UpdateJobRetryCount :exec
@@ -34,7 +39,8 @@ UPDATE jobs SET retry_count = $2 WHERE id = $1;
 -- name: UpdateJobPendingRetry :exec
 UPDATE jobs SET
     state = 'pending_retry',
-    resume_at = $2
+    resume_at = $2,
+    current_operation = NULL
 WHERE id = $1;
 
 -- name: GetJob :one

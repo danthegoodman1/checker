@@ -10,44 +10,39 @@ type JobState string
 
 const (
 	// JobStatePending means the job has been created but not yet started.
-	// Persisted to DB.
 	JobStatePending JobState = "pending"
 
 	// JobStateRunning means the job is currently running.
-	// Persisted to DB.
 	JobStateRunning JobState = "running"
 
-	// JobStateRestarting means the job is transitioning from failed to running (retry).
-	// Transient state, not persisted to DB.
-	JobStateRestarting JobState = "restarting"
-
-	// JobStateCheckpointing means a checkpoint operation is in progress.
-	// Transient state, not persisted to DB.
-	JobStateCheckpointing JobState = "checkpointing"
-
 	// JobStateSuspended means the job is suspended (checkpointed + scheduled for later wake).
-	// Persisted to DB.
 	JobStateSuspended JobState = "suspended"
 
 	// JobStatePendingRetry means the job failed and is waiting to retry after a delay.
-	// Persisted to DB.
 	JobStatePendingRetry JobState = "pending_retry"
 
-	// JobStateExiting means the process has signaled exit, cleanup is in progress.
-	// Transient state, not persisted to DB.
-	JobStateExiting JobState = "exiting"
-
-	// JobStateTerminating means kill was requested, waiting for process to stop.
-	// Transient state, not persisted to DB.
-	JobStateTerminating JobState = "terminating"
-
-	// JobStateCompleted means the job finished successfully.
-	// Persisted to DB (terminal state).
+	// JobStateCompleted means the job finished successfully (terminal state).
 	JobStateCompleted JobState = "completed"
 
-	// JobStateFailed means the job failed or crashed.
-	// Persisted to DB (terminal state).
+	// JobStateFailed means the job failed or crashed (terminal state).
 	JobStateFailed JobState = "failed"
+)
+
+// JobOperation represents an in-flight transient operation on a job.
+type JobOperation string
+
+const (
+	// JobOpCheckpointing means a checkpoint operation is in progress.
+	JobOpCheckpointing JobOperation = "checkpointing"
+
+	// JobOpTerminating means kill was requested, waiting for process to stop.
+	JobOpTerminating JobOperation = "terminating"
+
+	// JobOpExiting means the process has signaled exit, cleanup is in progress.
+	JobOpExiting JobOperation = "exiting"
+
+	// JobOpRestarting means the job is transitioning from failed to running (retry).
+	JobOpRestarting JobOperation = "restarting"
 )
 
 // Job represents a running or completed instance of a job definition.
@@ -63,6 +58,10 @@ type Job struct {
 
 	// State is the current state of the job.
 	State JobState
+
+	// CurrentOperation is the in-flight transient operation, if any.
+	// Empty string means no operation in progress.
+	CurrentOperation JobOperation
 
 	// Env holds the environment variables for the job process.
 	// This is set by the hypervisor and includes job metadata.
@@ -174,37 +173,4 @@ func (j *Job) Clone() *Job {
 // IsTerminal returns true if the job is in a terminal state (completed or failed).
 func (j *Job) IsTerminal() bool {
 	return j.State == JobStateCompleted || j.State == JobStateFailed
-}
-
-// IsRunning returns true if the job is actively running (including transient active states).
-func (j *Job) IsRunning() bool {
-	switch j.State {
-	case JobStateRunning, JobStateCheckpointing, JobStateExiting, JobStateTerminating:
-		return true
-	default:
-		return false
-	}
-}
-
-// IsTransient returns true if the job is in a transient state (not persisted to DB).
-func (j *Job) IsTransient() bool {
-	switch j.State {
-	case JobStateRestarting, JobStateCheckpointing, JobStateExiting, JobStateTerminating:
-		return true
-	default:
-		return false
-	}
-}
-
-// PersistableState returns the DB-persistable state for a job.
-// Transient states are mapped to their logical DB equivalent.
-func (j *Job) PersistableState() JobState {
-	switch j.State {
-	case JobStateRestarting:
-		return JobStatePending
-	case JobStateCheckpointing, JobStateExiting, JobStateTerminating:
-		return JobStateRunning
-	default:
-		return j.State
-	}
 }
