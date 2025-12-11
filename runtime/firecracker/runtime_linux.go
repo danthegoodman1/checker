@@ -377,6 +377,74 @@ func deleteTAPDevice(tapName string) error {
 	return nil
 }
 
+// copyFile copies a file from src to dst.
+func copyFile(src, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("failed to open source file: %w", err)
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.Create(dst)
+	if err != nil {
+		return fmt.Errorf("failed to create destination file: %w", err)
+	}
+	defer dstFile.Close()
+
+	if _, err := io.Copy(dstFile, srcFile); err != nil {
+		return fmt.Errorf("failed to copy file: %w", err)
+	}
+
+	return dstFile.Sync()
+}
+
+// injectEnvVars writes environment variables to /etc/checker.env in the ext4 rootfs.
+// The init script sources this file to set up the runtime environment.
+func injectEnvVars(rootfsPath string, env map[string]string) error {
+	// Create a temporary mount point
+	mountPoint, err := os.MkdirTemp("", "fc-rootfs-mount-")
+	if err != nil {
+		return fmt.Errorf("failed to create mount point: %w", err)
+	}
+	defer os.RemoveAll(mountPoint)
+
+	// Mount the ext4 filesystem
+	cmd := exec.Command("mount", "-o", "loop", rootfsPath, mountPoint)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to mount rootfs: %w, output: %s", err, string(output))
+	}
+	defer func() {
+		// Unmount when done
+		exec.Command("umount", mountPoint).Run()
+	}()
+
+	// Build the environment file content
+	var envContent bytes.Buffer
+	envContent.WriteString("# Runtime environment variables injected by Firecracker runtime\n")
+	for k, v := range env {
+		// Shell-escape the value by using single quotes and escaping any single quotes in the value
+		escapedValue := "'" + escapeShellValue(v) + "'"
+		envContent.WriteString(fmt.Sprintf("export %s=%s\n", k, escapedValue))
+	}
+
+	// Write to /etc/checker.env
+	envFilePath := filepath.Join(mountPoint, "etc", "checker.env")
+	if err := os.WriteFile(envFilePath, envContent.Bytes(), 0644); err != nil {
+		return fmt.Errorf("failed to write environment file: %w", err)
+	}
+
+	// Sync to ensure writes are flushed before unmount
+	exec.Command("sync").Run()
+
+	return nil
+}
+
+// escapeShellValue escapes a string for use inside single quotes in a shell script.
+// Single quotes are replaced with '\” (end quote, escaped quote, start quote).
+func escapeShellValue(s string) string {
+	return bytes.NewBuffer(bytes.ReplaceAll([]byte(s), []byte("'"), []byte("'\\''"))).String()
+}
+
 func (r *Runtime) Type() runtime.RuntimeType {
 	return runtime.RuntimeTypeFirecracker
 }
@@ -409,10 +477,46 @@ func (r *Runtime) Start(ctx context.Context, opts runtime.StartOptions) (runtime
 		Str("rootfs", cfg.RootfsPath).
 		Msg("starting Firecracker VM")
 
+	// Create work directory for this VM
+	workDir := filepath.Join(os.TempDir(), "checker", "firecracker-work", opts.ExecutionID)
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create work directory: %w", err)
+	}
+
+	// Copy rootfs to work directory so we can inject environment variables
+	workRootfs := filepath.Join(workDir, "rootfs.ext4")
+	if err := copyFile(cfg.RootfsPath, workRootfs); err != nil {
+		return nil, fmt.Errorf("failed to copy rootfs: %w", err)
+	}
+
+	// Build environment variables to inject
+	env := make(map[string]string)
+	// Copy user-provided env vars
+	for k, v := range opts.Env {
+		env[k] = v
+	}
+	// Add runtime-required env vars (these override user vars if there's a conflict)
+	env["CHECKER_API_URL"] = opts.APIHostAddress
+	env["CHECKER_JOB_ID"] = opts.ExecutionID
+
+	// Inject environment variables into the rootfs
+	if err := injectEnvVars(workRootfs, env); err != nil {
+		return nil, fmt.Errorf("failed to inject environment variables: %w", err)
+	}
+
+	r.logger.Debug().
+		Str("work_rootfs", workRootfs).
+		Int("env_count", len(env)).
+		Msg("injected environment variables into rootfs")
+
+	// Create a modified config with the working rootfs
+	workCfg := *cfg
+	workCfg.RootfsPath = workRootfs
+
 	// Snapshot directory is determined by the runtime
 	snapshotDir := filepath.Join(os.TempDir(), "checker", "firecracker-snapshots", opts.ExecutionID)
 
-	return r.startVM(ctx, opts.ExecutionID, cfg, snapshotDir, opts.APIHostAddress, opts.Stdout, opts.Stderr)
+	return r.startVM(ctx, opts.ExecutionID, &workCfg, snapshotDir, opts.APIHostAddress, opts.Stdout, opts.Stderr)
 }
 
 func (r *Runtime) startVM(ctx context.Context, executionID string, cfg *Config, snapshotDir string, apiHostAddress string, stdout, stderr io.Writer) (runtime.Process, error) {

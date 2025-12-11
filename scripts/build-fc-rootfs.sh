@@ -113,6 +113,13 @@ $NETWORK_SETUP
 # Set environment variables from container config
 $ENV_VARS
 
+# Source runtime-injected environment variables (CHECKER_API_URL, CHECKER_JOB_ID, etc.)
+# These are written by the Firecracker runtime before starting the VM.
+if [ -f /etc/checker.env ]; then
+    echo "Loading runtime environment from /etc/checker.env"
+    . /etc/checker.env
+fi
+
 # Change to working directory
 cd $WORKDIR
 
