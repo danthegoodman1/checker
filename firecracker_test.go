@@ -172,7 +172,7 @@ func TestFirecrackerHypervisorIntegration(t *testing.T) {
 	jobID, err := h.Spawn(ctx, hypervisor.SpawnOptions{
 		DefinitionName:    "fc-integration-test",
 		DefinitionVersion: "1.0.0",
-		Params:            json.RawMessage(`{"number": 5, "suspend_duration": "3s"}`),
+		Params:            json.RawMessage(`{"number": 5, "suspend_duration": "500ms"}`),
 		Stdout:            &testLogWriter{t: t, prefix: "[fc-stdout]"},
 		Stderr:            &testLogWriter{t: t, prefix: "[fc-stderr]"},
 	})
@@ -514,7 +514,7 @@ func TestFirecrackerProcessCrashRestoreFromCheckpoint(t *testing.T) {
 		Params: json.RawMessage(`{
 			"number": 5,
 			"checkpoint_keep_running": true,
-			"sleep_after_checkpoint_ms": 5000
+			"sleep_after_checkpoint_ms": 2000
 		}`),
 		Stdout: &testLogWriter{t: t, prefix: "[fc-stdout]"},
 		Stderr: &testLogWriter{t: t, prefix: "[fc-stderr]"},
@@ -542,7 +542,7 @@ func TestFirecrackerProcessCrashRestoreFromCheckpoint(t *testing.T) {
 	require.True(t, checkpointed, "Job did not checkpoint")
 
 	// Give the job a moment to start sleeping after checkpoint
-	time.Sleep(2 * time.Second)
+	time.Sleep(500 * time.Millisecond)
 
 	// Phase 2: Kill the Firecracker process while it's running (after checkpoint)
 	t.Log("=== Phase 2: Killing Firecracker process while running (after checkpoint) ===")
@@ -695,7 +695,7 @@ func TestFirecrackerFullSystemCrashWhileRunning(t *testing.T) {
 		Params: json.RawMessage(`{
 			"number": 4,
 			"checkpoint_keep_running": true,
-			"sleep_after_checkpoint_ms": 30000
+			"sleep_after_checkpoint_ms": 2000
 		}`),
 		Stdout: &testLogWriter{t: t, prefix: "[fc-stdout]"},
 		Stderr: &testLogWriter{t: t, prefix: "[fc-stderr]"},
@@ -723,7 +723,7 @@ func TestFirecrackerFullSystemCrashWhileRunning(t *testing.T) {
 	require.True(t, checkpointed, "Job did not checkpoint")
 
 	// Give the job a moment to start sleeping after checkpoint
-	time.Sleep(2 * time.Second)
+	time.Sleep(500 * time.Millisecond)
 
 	// Phase 2: Simulate full system crash - kill BOTH VM and hypervisor
 	t.Log("=== Phase 2: Simulating full system crash (VM + hypervisor) ===")
