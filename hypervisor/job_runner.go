@@ -792,10 +792,6 @@ func (r *JobRunner) notifyWaiters() {
 	r.resultWaiters = nil
 }
 
-// ============================================================================
-// Public API - thin wrappers that send commands and wait for results
-// ============================================================================
-
 // sendCommand sends a command and waits for the result.
 // Returns an error result if the runner stops before the command completes.
 func (r *JobRunner) sendCommand(cmd command) commandResult {
@@ -972,10 +968,6 @@ func (r *JobRunner) SetOnFailure(fn func(job *Job, exitCode int) RetryDecision) 
 func (r *JobRunner) SetCheckpoint(checkpoint runtime.Checkpoint) {
 	r.checkpoint = checkpoint
 }
-
-// ============================================================================
-// Database persistence helpers
-// ============================================================================
 
 func (r *JobRunner) persistJobCompleted(state query.JobState, completedAt *time.Time, result *JobResult, errorMsg string) {
 	var resultExitCode pgtype.Int4
