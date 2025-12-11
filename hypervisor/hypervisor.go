@@ -803,6 +803,13 @@ func (h *Hypervisor) RecoverState(ctx context.Context) error {
 }
 
 // recoverJobs recovers non-terminal jobs from the database.
+//
+// Recovery scenarios:
+//  1. Job was pending when we crashed → restartPendingJob (start fresh)
+//  2. Job was running when we crashed → recoverRunningJob:
+//     a. Has checkpoint → restore from checkpoint via wakeJob
+//     b. No checkpoint → retry if policy allows, else mark as failed
+//  3. Job was suspended/pending_retry → resume poller handles these on its normal schedule
 func (h *Hypervisor) recoverJobs(ctx context.Context) error {
 	var dbJobs []query.Job
 	err := query.ReliableExecInTx(ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {

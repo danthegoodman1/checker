@@ -44,48 +44,15 @@ This indirection could be simplified.
 
 ---
 
-### 2. Recovery Code Paths (Documentation Issue)
+### 2. ~~Recovery Code Paths (Documentation Issue)~~ ✅ RESOLVED
 
-**Current State:**
-
-The recovery logic has multiple entry points:
-
-- `recoverRunningJob` - crashed mid-execution
-- `restartPendingJob` - never started
-- Resume poller - suspended/pending_retry
-
-**Recommendation:**
-
-Consider unifying into a single recovery path or at minimum add a comment block explaining when each is used:
-
-```go
-// Recovery scenarios:
-// 1. Job was pending when we crashed → restartPendingJob (start fresh)
-// 2. Job was running when we crashed:
-//    a. Has checkpoint → wakeJob (restore from checkpoint)  
-//    b. No checkpoint → retry if policy allows, else fail
-// 3. Job was suspended/pending_retry → resume poller handles it
-```
+Added comment block to `recoverJobs` explaining all recovery scenarios.
 
 ---
 
-### 3. Database Persistence Inconsistency
+### 3. ~~Database Persistence Inconsistency~~ ✅ RESOLVED
 
-**Current State:**
-
-Some persist methods use `ReliableExecInTx` and others use `ReliableExec`:
-
-```go
-// Sometimes:
-if dbErr := query.ReliableExecInTx(r.ctx, r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
-
-// Other times:
-if dbErr := query.ReliableExec(r.ctx, r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
-```
-
-**Recommendation:**
-
-Standardize on one pattern (likely `ReliableExecInTx` for consistency) unless there's a specific reason for the difference.
+All database operations now consistently use `ReliableExecInTx` for transaction safety.
 
 ---
 
