@@ -323,13 +323,21 @@ func NewRuntime() (*Runtime, error) {
 }
 
 // generateTAPName creates a TAP device name from an execution ID.
-// Uses first 8 characters of execution ID for uniqueness while staying under
-// the 15-character limit for network interface names.
+// Uses the unique portion of the execution ID (snowflake ID part) while staying under
+// the 15-character limit for network interface names (IFNAMSIZ=16 including null).
+// For execution IDs like "job-1765430333173062443-1", we skip "job-" and take
+// up to 11 characters from the unique snowflake portion.
 func generateTAPName(executionID string) string {
-	if len(executionID) > 8 {
-		executionID = executionID[:8]
+	// Skip common prefixes to get to the unique part
+	name := executionID
+	if len(name) > 4 && name[:4] == "job-" {
+		name = name[4:] // Skip "job-" prefix
 	}
-	return fmt.Sprintf("tap-%s", executionID)
+	// Take up to 11 characters to stay under the 15-char limit with "tap-" prefix
+	if len(name) > 11 {
+		name = name[:11]
+	}
+	return fmt.Sprintf("tap-%s", name)
 }
 
 // createTAPDevice creates a TAP device and attaches it to the specified bridge.
@@ -442,6 +450,9 @@ func (r *Runtime) startVM(ctx context.Context, executionID string, cfg *Config, 
 		Str("tap", tapDeviceName).
 		Str("bridge", cfg.Network.BridgeName).
 		Msg("creating TAP device")
+
+	// Delete any stale TAP device with the same name (from crashed tests/runs)
+	_ = deleteTAPDevice(tapDeviceName)
 
 	if err := createTAPDevice(tapDeviceName, cfg.Network.BridgeName); err != nil {
 		return nil, fmt.Errorf("failed to create TAP device: %w", err)
