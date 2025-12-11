@@ -600,7 +600,8 @@ func (r *Runtime) startVM(ctx context.Context, executionID string, cfg *Config, 
 	logger.Debug().Str("mac", guestMAC).Msg("using guest MAC address")
 
 	// Start Firecracker process
-	fcCmd := exec.CommandContext(ctx, "firecracker", "--api-sock", socketPath, "--level", "Error")
+	// Use Info level to see more output for debugging
+	fcCmd := exec.CommandContext(ctx, "firecracker", "--api-sock", socketPath, "--level", "Info")
 	if stdout != nil {
 		fcCmd.Stdout = stdout
 	}
