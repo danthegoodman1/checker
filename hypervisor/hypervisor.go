@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -341,7 +342,10 @@ func (h *Hypervisor) Spawn(ctx context.Context, opts SpawnOptions) (string, erro
 		<-runner.Done()
 		job, err := runner.GetState(h.ctx)
 		if err != nil {
-			logger.Error().Err(err).Str("job_id", jobID).Msg("failed to get job state for eviction")
+			// Context canceled means hypervisor is shutting down, no need to log
+			if !errors.Is(err, context.Canceled) {
+				logger.Error().Err(err).Str("job_id", jobID).Msg("failed to get job state for eviction")
+			}
 			return
 		}
 		h.maybeEvictJob(jobID, job)
