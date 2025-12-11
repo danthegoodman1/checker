@@ -172,7 +172,7 @@ func TestFirecrackerHypervisorIntegration(t *testing.T) {
 	jobID, err := h.Spawn(ctx, hypervisor.SpawnOptions{
 		DefinitionName:    "fc-integration-test",
 		DefinitionVersion: "1.0.0",
-		Params:            json.RawMessage(`{"number": 5, "suspend_duration": "1s"}`),
+		Params:            json.RawMessage(`{"number": 5, "suspend_duration": "3s"}`),
 		Stdout:            &testLogWriter{t: t, prefix: "[fc-stdout]"},
 		Stderr:            &testLogWriter{t: t, prefix: "[fc-stderr]"},
 	})
