@@ -444,10 +444,6 @@ func (r *JobRunner) handleCheckpoint(cmd command) {
 		r.logger.Error().Err(dbErr).Msg("CRITICAL: checkpoint succeeded but DB persist failed")
 	}
 
-	if !keepRunning && r.job.ResumeAt != nil {
-		r.scheduleSuspendWake(*r.job.ResumeAt)
-	}
-
 	if cmd.resultChan != nil {
 		cmd.resultChan <- commandResult{job: r.job.Clone()}
 	}
@@ -459,31 +455,6 @@ func (r *JobRunner) handleCheckpoint(cmd command) {
 		}
 	}
 	r.pendingCheckpointRequests = nil
-}
-
-// scheduleSuspendWake schedules a job restore when the suspend duration expires
-func (r *JobRunner) scheduleSuspendWake(wakeTime time.Time) {
-	delay := time.Until(wakeTime)
-	if delay < 0 {
-		delay = 0
-	}
-
-	r.logger.Debug().
-		Time("wake_time", wakeTime).
-		Dur("delay", delay).
-		Msg("scheduling suspend wake")
-
-	time.AfterFunc(delay, func() {
-		select {
-		case <-r.ctx.Done():
-			r.logger.Debug().Msg("suspend wake timer fired but context cancelled")
-			return
-		default:
-		}
-
-		r.logger.Debug().Msg("suspend wake timer fired, sending wake command")
-		r.cmdChan <- command{typ: cmdWake}
-	})
 }
 
 // handleWake handles waking from suspended state
@@ -1054,11 +1025,6 @@ func (r *JobRunner) SetOnFailure(fn func(job *Job, exitCode int) RetryDecision) 
 // SetCheckpoint sets the checkpoint for restoration (used during recovery).
 func (r *JobRunner) SetCheckpoint(checkpoint runtime.Checkpoint) {
 	r.checkpoint = checkpoint
-}
-
-// ScheduleSuspendWake schedules a wake timer (used during recovery).
-func (r *JobRunner) ScheduleSuspendWake(wakeTime time.Time) {
-	r.scheduleSuspendWake(wakeTime)
 }
 
 // ============================================================================

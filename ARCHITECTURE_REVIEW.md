@@ -15,41 +15,7 @@ The hypervisor is a well-designed system for managing checkpointable/snapshottab
 
 ## Complexity Analysis & Recommendations
 
-### 1. Dual Wake Mechanism (High Impact)
-
-**Current State:**
-
-Jobs can wake via two paths:
-
-- **In-memory timer** (`scheduleSuspendWake`) for short sleeps
-- **Poller** (`startResumePoller`) for evicted jobs (>10s sleep)
-
-The 10-second threshold in `maybeEvictJob` is hardcoded:
-
-```go
-if job.State == JobStateSuspended && job.ResumeAt != nil {
-    if time.Until(*job.ResumeAt) > 10*time.Second {
-        // Evict long-sleeping jobs - the resume poller will reload them
-        h.runnersMu.Lock()
-        delete(h.runners, jobID)
-        h.runnersMu.Unlock()
-    }
-}
-```
-
-**Recommendation:**
-
-Always use the poller for resume. Remove `scheduleSuspendWake` entirely:
-
-- Simpler memory management (always evict suspended jobs)
-- Consistent wake path
-- Trade-off: Wake latency becomes `wakePollerInterval` (configurable, default 5s)
-
-This eliminates ~30 lines and removes a race condition window where the timer fires but the context is cancelled.
-
----
-
-### 2. Command Loop Boilerplate (Medium Impact)
+### 1. Command Loop Boilerplate (Medium Impact)
 
 **Current State:**
 
@@ -99,7 +65,7 @@ This could reduce the public API methods by ~100 lines.
 
 ---
 
-### 3. Checkpoint Request Collapsing (Low Impact)
+### 2. Checkpoint Request Collapsing (Low Impact)
 
 **Current State:**
 
@@ -121,7 +87,7 @@ If this is defensive code that never triggers, consider removing it. The idempot
 
 ---
 
-### 4. ResultWaiters Pattern (Low Impact)
+### 3. ResultWaiters Pattern (Low Impact)
 
 **Current State:**
 
@@ -150,7 +116,7 @@ This indirection could be simplified.
 
 ---
 
-### 5. Recovery Code Paths (Documentation Issue)
+### 4. Recovery Code Paths (Documentation Issue)
 
 **Current State:**
 
@@ -175,7 +141,7 @@ Consider unifying into a single recovery path or at minimum add a comment block 
 
 ---
 
-### 6. Database Persistence Inconsistency
+### 5. Database Persistence Inconsistency
 
 **Current State:**
 

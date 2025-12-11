@@ -633,7 +633,7 @@ func (h *Hypervisor) Shutdown(ctx context.Context) error {
 func (h *Hypervisor) DevCrash() {
 	h.cancel()
 
-	// Cancel all runner contexts to stop any pending timers (e.g., scheduleSuspendWake)
+	// Cancel all runner contexts
 	h.runnersMu.RLock()
 	for _, runner := range h.runners {
 		runner.Cancel()
@@ -674,7 +674,7 @@ func (h *Hypervisor) setupRetryCallback(runner *JobRunner, jd *JobDefinition) {
 	})
 }
 
-// maybeEvictJob evicts a job from memory if it's in a terminal state, pending retry, or sleeping for more than 10 seconds.
+// maybeEvictJob evicts a job from memory if it's in a terminal state, pending retry, or suspended.
 // This is safe because the DB is the source of truth - jobs can be reloaded when needed.
 func (h *Hypervisor) maybeEvictJob(jobID string, job *Job) {
 	if job.IsTerminal() {
@@ -699,16 +699,14 @@ func (h *Hypervisor) maybeEvictJob(jobID string, job *Job) {
 	}
 
 	if job.State == JobStateSuspended && job.ResumeAt != nil {
-		if time.Until(*job.ResumeAt) > 10*time.Second {
-			// Evict long-sleeping jobs - the resume poller will reload them
-			h.runnersMu.Lock()
-			delete(h.runners, jobID)
-			h.runnersMu.Unlock()
-			logger.Debug().
-				Str("job_id", jobID).
-				Time("resume_at", *job.ResumeAt).
-				Msg("evicted long-sleeping job from memory")
-		}
+		// Evict suspended jobs - the resume poller will reload them
+		h.runnersMu.Lock()
+		delete(h.runners, jobID)
+		h.runnersMu.Unlock()
+		logger.Debug().
+			Str("job_id", jobID).
+			Time("resume_at", *job.ResumeAt).
+			Msg("evicted suspended job from memory")
 	}
 }
 
