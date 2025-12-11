@@ -60,11 +60,6 @@ type Config struct {
 	// Defaults to 512 if not specified.
 	MemSizeMib int `json:"mem_size_mib"`
 
-	// VsockCID is the context ID for the vsock device.
-	// Used for VM-to-host communication. Guest CID must be >= 3.
-	// If 0, vsock is disabled.
-	VsockCID uint32 `json:"vsock_cid"`
-
 	// BootArgs are additional kernel boot arguments.
 	// If empty, sensible defaults are used for fast boot.
 	BootArgs string `json:"boot_args"`

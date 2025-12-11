@@ -293,13 +293,11 @@ func (h *processHandle) Cleanup(ctx context.Context) error {
 		_ = os.Remove(h.socketPath)
 	}
 
-	// Delete TAP device if it was created
-	if h.tapDeviceName != "" {
-		if err := deleteTAPDevice(h.tapDeviceName); err != nil {
-			h.logger.Warn().Err(err).Str("tap", h.tapDeviceName).Msg("failed to delete TAP device")
-		} else {
-			h.logger.Debug().Str("tap", h.tapDeviceName).Msg("deleted TAP device")
-		}
+	// Delete TAP device
+	if err := deleteTAPDevice(h.tapDeviceName); err != nil {
+		h.logger.Warn().Err(err).Str("tap", h.tapDeviceName).Msg("failed to delete TAP device")
+	} else {
+		h.logger.Debug().Str("tap", h.tapDeviceName).Msg("deleted TAP device")
 	}
 
 	h.logger.Debug().Msg("Firecracker VM cleaned up")
@@ -433,32 +431,33 @@ func (r *Runtime) startVM(ctx context.Context, executionID string, cfg *Config, 
 		Str("socket", socketPath).
 		Logger()
 
-	// Create TAP device if network config is provided
-	var tapDeviceName string
-	var guestMAC string
-	if cfg.Network != nil {
-		tapDeviceName = generateTAPName(executionID)
-		logger.Debug().
-			Str("tap", tapDeviceName).
-			Str("bridge", cfg.Network.BridgeName).
-			Msg("creating TAP device")
-
-		if err := createTAPDevice(tapDeviceName, cfg.Network.BridgeName); err != nil {
-			return nil, fmt.Errorf("failed to create TAP device: %w", err)
-		}
-
-		// Generate MAC address if not provided
-		guestMAC = cfg.Network.GuestMAC
-		if guestMAC == "" {
-			var err error
-			guestMAC, err = GenerateMAC()
-			if err != nil {
-				_ = deleteTAPDevice(tapDeviceName)
-				return nil, fmt.Errorf("failed to generate MAC address: %w", err)
-			}
-		}
-		logger.Debug().Str("mac", guestMAC).Msg("using guest MAC address")
+	// Network config is required for hypervisor communication
+	if cfg.Network == nil {
+		return nil, fmt.Errorf("network config is required")
 	}
+
+	// Create TAP device
+	tapDeviceName := generateTAPName(executionID)
+	logger.Debug().
+		Str("tap", tapDeviceName).
+		Str("bridge", cfg.Network.BridgeName).
+		Msg("creating TAP device")
+
+	if err := createTAPDevice(tapDeviceName, cfg.Network.BridgeName); err != nil {
+		return nil, fmt.Errorf("failed to create TAP device: %w", err)
+	}
+
+	// Generate MAC address if not provided
+	guestMAC := cfg.Network.GuestMAC
+	if guestMAC == "" {
+		var err error
+		guestMAC, err = GenerateMAC()
+		if err != nil {
+			_ = deleteTAPDevice(tapDeviceName)
+			return nil, fmt.Errorf("failed to generate MAC address: %w", err)
+		}
+	}
+	logger.Debug().Str("mac", guestMAC).Msg("using guest MAC address")
 
 	// Start Firecracker process
 	fcCmd := exec.CommandContext(ctx, "firecracker", "--api-sock", socketPath, "--level", "Error")
@@ -470,9 +469,7 @@ func (r *Runtime) startVM(ctx context.Context, executionID string, cfg *Config, 
 	}
 
 	if err := fcCmd.Start(); err != nil {
-		if tapDeviceName != "" {
-			_ = deleteTAPDevice(tapDeviceName)
-		}
+		_ = deleteTAPDevice(tapDeviceName)
 		return nil, fmt.Errorf("failed to start firecracker: %w", err)
 	}
 
@@ -495,9 +492,7 @@ func (r *Runtime) startVM(ctx context.Context, executionID string, cfg *Config, 
 	// Wait for socket to be ready
 	if err := handle.waitForSocket(ctx, 5*time.Second); err != nil {
 		_ = fcCmd.Process.Kill()
-		if tapDeviceName != "" {
-			_ = deleteTAPDevice(tapDeviceName)
-		}
+		_ = deleteTAPDevice(tapDeviceName)
 		return nil, fmt.Errorf("firecracker socket not ready: %w", err)
 	}
 
@@ -508,9 +503,7 @@ func (r *Runtime) startVM(ctx context.Context, executionID string, cfg *Config, 
 	}
 	if err := handle.api(ctx, "boot-source", bootSource); err != nil {
 		_ = fcCmd.Process.Kill()
-		if tapDeviceName != "" {
-			_ = deleteTAPDevice(tapDeviceName)
-		}
+		_ = deleteTAPDevice(tapDeviceName)
 		return nil, fmt.Errorf("failed to configure boot source: %w", err)
 	}
 
@@ -523,9 +516,7 @@ func (r *Runtime) startVM(ctx context.Context, executionID string, cfg *Config, 
 	}
 	if err := handle.api(ctx, "drives/rootfs", rootDrive); err != nil {
 		_ = fcCmd.Process.Kill()
-		if tapDeviceName != "" {
-			_ = deleteTAPDevice(tapDeviceName)
-		}
+		_ = deleteTAPDevice(tapDeviceName)
 		return nil, fmt.Errorf("failed to configure root drive: %w", err)
 	}
 
@@ -536,53 +527,30 @@ func (r *Runtime) startVM(ctx context.Context, executionID string, cfg *Config, 
 	}
 	if err := handle.api(ctx, "machine-config", machineConfig); err != nil {
 		_ = fcCmd.Process.Kill()
-		if tapDeviceName != "" {
-			_ = deleteTAPDevice(tapDeviceName)
-		}
+		_ = deleteTAPDevice(tapDeviceName)
 		return nil, fmt.Errorf("failed to configure machine: %w", err)
 	}
 
-	// Configure vsock if CID is provided
-	if cfg.VsockCID > 0 {
-		vsockPath := filepath.Join(workDir, "vsock.sock")
-		vsockConfig := map[string]any{
-			"guest_cid": cfg.VsockCID,
-			"uds_path":  vsockPath,
-		}
-		if err := handle.api(ctx, "vsock", vsockConfig); err != nil {
-			_ = fcCmd.Process.Kill()
-			if tapDeviceName != "" {
-				_ = deleteTAPDevice(tapDeviceName)
-			}
-			return nil, fmt.Errorf("failed to configure vsock: %w", err)
-		}
+	// Configure network interface (must be done BEFORE InstanceStart)
+	networkConfig := map[string]string{
+		"iface_id":      "eth0",
+		"guest_mac":     guestMAC,
+		"host_dev_name": tapDeviceName,
 	}
-
-	// Configure network interface if network config is provided
-	// This must be done BEFORE InstanceStart
-	if cfg.Network != nil {
-		networkConfig := map[string]string{
-			"iface_id":      "eth0",
-			"guest_mac":     guestMAC,
-			"host_dev_name": tapDeviceName,
-		}
-		if err := handle.api(ctx, "network-interfaces/eth0", networkConfig); err != nil {
-			_ = fcCmd.Process.Kill()
-			_ = deleteTAPDevice(tapDeviceName)
-			return nil, fmt.Errorf("failed to configure network interface: %w", err)
-		}
-		logger.Debug().
-			Str("tap", tapDeviceName).
-			Str("mac", guestMAC).
-			Msg("configured network interface")
+	if err := handle.api(ctx, "network-interfaces/eth0", networkConfig); err != nil {
+		_ = fcCmd.Process.Kill()
+		_ = deleteTAPDevice(tapDeviceName)
+		return nil, fmt.Errorf("failed to configure network interface: %w", err)
 	}
+	logger.Debug().
+		Str("tap", tapDeviceName).
+		Str("mac", guestMAC).
+		Msg("configured network interface")
 
 	// Start the VM
 	if err := handle.api(ctx, "actions", map[string]string{"action_type": "InstanceStart"}); err != nil {
 		_ = fcCmd.Process.Kill()
-		if tapDeviceName != "" {
-			_ = deleteTAPDevice(tapDeviceName)
-		}
+		_ = deleteTAPDevice(tapDeviceName)
 		return nil, fmt.Errorf("failed to start VM: %w", err)
 	}
 
@@ -638,21 +606,26 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 		Str("socket", socketPath).
 		Logger()
 
-	// Recreate TAP device if network config exists
-	var tapDeviceName string
-	if c.config.Network != nil && c.tapDeviceName != "" {
-		tapDeviceName = c.tapDeviceName
-		logger.Debug().
-			Str("tap", tapDeviceName).
-			Str("bridge", c.config.Network.BridgeName).
-			Msg("recreating TAP device for restore")
+	// Network config is required
+	if c.config.Network == nil {
+		return nil, fmt.Errorf("network config is required")
+	}
 
-		// Delete old TAP device if it exists (from previous run)
-		_ = deleteTAPDevice(tapDeviceName)
+	// Recreate TAP device
+	tapDeviceName := c.tapDeviceName
+	if tapDeviceName == "" {
+		tapDeviceName = generateTAPName(c.executionID)
+	}
+	logger.Debug().
+		Str("tap", tapDeviceName).
+		Str("bridge", c.config.Network.BridgeName).
+		Msg("recreating TAP device for restore")
 
-		if err := createTAPDevice(tapDeviceName, c.config.Network.BridgeName); err != nil {
-			return nil, fmt.Errorf("failed to recreate TAP device: %w", err)
-		}
+	// Delete old TAP device if it exists (from previous run)
+	_ = deleteTAPDevice(tapDeviceName)
+
+	if err := createTAPDevice(tapDeviceName, c.config.Network.BridgeName); err != nil {
+		return nil, fmt.Errorf("failed to recreate TAP device: %w", err)
 	}
 
 	// Start Firecracker process
@@ -665,9 +638,7 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 	}
 
 	if err := fcCmd.Start(); err != nil {
-		if tapDeviceName != "" {
-			_ = deleteTAPDevice(tapDeviceName)
-		}
+		_ = deleteTAPDevice(tapDeviceName)
 		return nil, fmt.Errorf("failed to start firecracker: %w", err)
 	}
 
@@ -692,13 +663,11 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 	// Wait for socket to be ready
 	if err := handle.waitForSocket(ctx, 5*time.Second); err != nil {
 		_ = fcCmd.Process.Kill()
-		if tapDeviceName != "" {
-			_ = deleteTAPDevice(tapDeviceName)
-		}
+		_ = deleteTAPDevice(tapDeviceName)
 		return nil, fmt.Errorf("firecracker socket not ready: %w", err)
 	}
 
-	// Load snapshot with network config if needed
+	// Load snapshot with network backend config
 	loadReq := map[string]any{
 		"snapshot_path": c.snapshotPath,
 		"mem_backend": map[string]string{
@@ -706,33 +675,25 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 			"backend_path": c.memFilePath,
 		},
 		"enable_diff_snapshots": false,
-	}
-
-	// For restore with networking, we need to provide the network backend config
-	// that maps the guest network interface to the new TAP device
-	if c.config.Network != nil && tapDeviceName != "" {
-		loadReq["net_backend"] = []map[string]string{
+		// Map the guest network interface to the new TAP device
+		"net_backend": []map[string]string{
 			{
 				"iface_id":      "eth0",
 				"host_dev_name": tapDeviceName,
 			},
-		}
+		},
 	}
 
 	if err := handle.api(ctx, "snapshot/load", loadReq); err != nil {
 		_ = fcCmd.Process.Kill()
-		if tapDeviceName != "" {
-			_ = deleteTAPDevice(tapDeviceName)
-		}
+		_ = deleteTAPDevice(tapDeviceName)
 		return nil, fmt.Errorf("failed to load snapshot: %w", err)
 	}
 
 	// Resume the VM
 	if err := handle.apiPatch(ctx, "vm", map[string]string{"state": "Resumed"}); err != nil {
 		_ = fcCmd.Process.Kill()
-		if tapDeviceName != "" {
-			_ = deleteTAPDevice(tapDeviceName)
-		}
+		_ = deleteTAPDevice(tapDeviceName)
 		return nil, fmt.Errorf("failed to resume VM: %w", err)
 	}
 
@@ -749,22 +710,20 @@ func (r *Runtime) ReconstructCheckpoint(checkpointPath string, executionID strin
 		return nil, fmt.Errorf("invalid config type: expected *firecracker.Config, got %T", config)
 	}
 
+	// Network config is required
+	if cfg.Network == nil {
+		return nil, fmt.Errorf("network config is required")
+	}
+
 	// Memory file is in the same directory with a different prefix
 	dir := filepath.Dir(checkpointPath)
 	memFilePath := filepath.Join(dir, fmt.Sprintf("mem-%s", executionID))
 
-	// For network config, regenerate TAP name and MAC address
-	// The TAP device will be recreated on restore
-	var tapDeviceName, guestMAC string
-	if cfg.Network != nil {
-		tapDeviceName = generateTAPName(executionID)
-		// Generate a new MAC for the restore - the guest doesn't care about MAC consistency
-		// since it configures networking in its init script
-		var err error
-		guestMAC, err = GenerateMAC()
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate MAC address: %w", err)
-		}
+	// Generate TAP name and MAC address for restore
+	tapDeviceName := generateTAPName(executionID)
+	guestMAC, err := GenerateMAC()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate MAC address: %w", err)
 	}
 
 	return &firecrackerCheckpoint{
