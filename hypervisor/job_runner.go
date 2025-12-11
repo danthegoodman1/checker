@@ -306,8 +306,10 @@ func (r *JobRunner) handleProcessExited(cmd command) {
 	}
 
 	// Call failure callback if applicable
+	// NOTE: Must be async to avoid deadlock - onFailure may call GetState/Retry
+	// which send commands back to this command loop
 	if failed && r.onFailure != nil {
-		r.onFailure(r, cmd.exitCode)
+		go r.onFailure(r, cmd.exitCode)
 		return
 	}
 }
