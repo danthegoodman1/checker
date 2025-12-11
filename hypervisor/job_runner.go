@@ -214,7 +214,6 @@ func (r *JobRunner) handleCommand(cmd command) {
 	}
 }
 
-// handleStart starts the job process
 func (r *JobRunner) handleStart(cmd command) {
 	// Can only start from Pending state
 	if r.job.State != JobStatePending {
@@ -256,7 +255,6 @@ func (r *JobRunner) handleStart(cmd command) {
 		r.logger.Error().Err(dbErr).Msg("failed to persist job started state to DB")
 	}
 
-	// Start waiting for process exit in background
 	go r.waitForProcessExit()
 
 	if cmd.resultChan != nil {
@@ -268,7 +266,6 @@ func (r *JobRunner) handleStart(cmd command) {
 func (r *JobRunner) waitForProcessExit() {
 	exitCode, err := r.process.Wait(r.ctx)
 
-	// Send process exited command
 	r.cmdChan <- command{
 		typ:       cmdProcessExited,
 		exitCode:  exitCode,
@@ -278,7 +275,6 @@ func (r *JobRunner) waitForProcessExit() {
 
 // handleProcessExited handles the process exit event
 func (r *JobRunner) handleProcessExited(cmd command) {
-	// If already terminal, ignore
 	if r.job.IsTerminal() {
 		return
 	}
@@ -307,14 +303,12 @@ func (r *JobRunner) handleProcessExited(cmd command) {
 
 	failed := r.job.State == JobStateFailed
 
-	// Cleanup process
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cleanupCancel()
 	if cleanupErr := r.process.Cleanup(cleanupCtx); cleanupErr != nil {
 		r.logger.Error().Err(cleanupErr).Msg("failed to cleanup process")
 	}
 
-	// Check if we should retry (callback decides based on job state)
 	if failed && r.onFailure != nil {
 		decision := r.onFailure(r.job.Clone(), cmd.exitCode)
 		if decision.ShouldRetry {
@@ -341,12 +335,10 @@ func (r *JobRunner) handleProcessExited(cmd command) {
 			}
 			return
 		}
-		// No retry - persist failed state
 		r.persistJobCompleted(query.JobStateFailed, r.job.CompletedAt, r.job.Result, r.job.Error)
 		return
 	}
 
-	// No failure callback or job succeeded - persist to DB
 	var dbState query.JobState
 	if r.job.State == JobStateCompleted {
 		dbState = query.JobStateCompleted
@@ -358,7 +350,6 @@ func (r *JobRunner) handleProcessExited(cmd command) {
 
 // handleCheckpoint handles a checkpoint request
 func (r *JobRunner) handleCheckpoint(cmd command) {
-	// Token is required
 	if cmd.token == "" {
 		if cmd.resultChan != nil {
 			cmd.resultChan <- commandResult{err: fmt.Errorf("checkpoint token is required")}
@@ -375,7 +366,6 @@ func (r *JobRunner) handleCheckpoint(cmd command) {
 		return
 	}
 
-	// Check if already terminal
 	if r.job.IsTerminal() {
 		if cmd.resultChan != nil {
 			cmd.resultChan <- commandResult{err: fmt.Errorf("job has terminated")}
@@ -390,7 +380,6 @@ func (r *JobRunner) handleCheckpoint(cmd command) {
 		return
 	}
 
-	// Check if there are active locks
 	if len(r.activeLocks) > 0 {
 		if cmd.resultChan != nil {
 			cmd.resultChan <- commandResult{err: fmt.Errorf("cannot checkpoint: %d active locks", len(r.activeLocks))}
@@ -418,10 +407,8 @@ func (r *JobRunner) handleCheckpoint(cmd command) {
 		r.job.ResumeAt = &resumeAt
 	}
 
-	// Perform checkpoint
 	checkpoint, err := r.process.Checkpoint(cmd.ctx, keepRunning)
 	if err != nil {
-		// Revert state on failure
 		r.job.CheckpointCount--
 		r.job.State = JobStateRunning
 		r.job.ResumeAt = nil
@@ -443,14 +430,12 @@ func (r *JobRunner) handleCheckpoint(cmd command) {
 	r.checkpoint = checkpoint
 	r.checkpointTokens[cmd.token] = struct{}{}
 
-	// Update job state based on keepRunning
 	if keepRunning {
 		r.job.State = JobStateRunning
 	} else {
 		r.job.State = JobStateSuspended
 	}
 
-	// Persist to DB
 	dbState := query.JobStateRunning
 	if !keepRunning {
 		dbState = query.JobStateSuspended
@@ -459,17 +444,14 @@ func (r *JobRunner) handleCheckpoint(cmd command) {
 		r.logger.Error().Err(dbErr).Msg("CRITICAL: checkpoint succeeded but DB persist failed")
 	}
 
-	// Schedule wake timer if suspended
 	if !keepRunning && r.job.ResumeAt != nil {
 		r.scheduleSuspendWake(*r.job.ResumeAt)
 	}
 
-	// Notify original requester
 	if cmd.resultChan != nil {
 		cmd.resultChan <- commandResult{job: r.job.Clone()}
 	}
 
-	// Notify collapsed requests
 	for _, ch := range r.pendingCheckpointRequests {
 		if ch != nil {
 			r.checkpointTokens[cmd.token] = struct{}{} // They share the token
@@ -692,14 +674,12 @@ func (r *JobRunner) handleReleaseLock(cmd command) {
 // handleWaitForResult registers a waiter for job completion
 func (r *JobRunner) handleWaitForResult(cmd command) {
 	if r.job.IsTerminal() {
-		// Already done, signal immediately
 		if cmd.resultChan != nil {
 			cmd.resultChan <- commandResult{job: r.job.Clone()}
 		}
 		return
 	}
 
-	// Create a wait channel
 	waitChan := make(chan struct{})
 	r.resultWaiters = append(r.resultWaiters, waitChan)
 
@@ -734,7 +714,6 @@ func (r *JobRunner) handleRetry(cmd command) {
 
 	r.persistJobRetryCount(r.job.RetryCount)
 
-	// Check if we have a checkpoint to restore from
 	hasCheckpoint := r.checkpoint != nil
 
 	if hasCheckpoint {
@@ -844,7 +823,6 @@ func (r *JobRunner) notifyWaiters() {
 // Public API - thin wrappers that send commands and wait for results
 // ============================================================================
 
-// Start starts the job process.
 func (r *JobRunner) Start() error {
 	resultChan := make(chan commandResult, 1)
 	select {
@@ -878,7 +856,6 @@ func (r *JobRunner) Retry() error {
 	}
 }
 
-// GetState returns the current job state.
 func (r *JobRunner) GetState(ctx context.Context) (*Job, error) {
 	resultChan := make(chan commandResult, 1)
 	select {
@@ -901,7 +878,6 @@ func (r *JobRunner) GetState(ctx context.Context) (*Job, error) {
 	}
 }
 
-// Checkpoint requests a checkpoint of the job.
 func (r *JobRunner) Checkpoint(ctx context.Context, suspendDuration time.Duration, token string) (*Job, error) {
 	resultChan := make(chan commandResult, 1)
 	select {
@@ -928,7 +904,6 @@ func (r *JobRunner) Checkpoint(ctx context.Context, suspendDuration time.Duratio
 	}
 }
 
-// Kill terminates the job.
 func (r *JobRunner) Kill(ctx context.Context) (*Job, error) {
 	resultChan := make(chan commandResult, 1)
 	select {
@@ -1023,7 +998,6 @@ func (r *JobRunner) ReleaseLock(ctx context.Context, lockID string) error {
 
 // WaitForResult returns a channel that will be closed when the job completes.
 func (r *JobRunner) WaitForResult() <-chan struct{} {
-	// Check if already done
 	select {
 	case <-r.doneChan:
 		ch := make(chan struct{})
@@ -1063,11 +1037,9 @@ func (r *JobRunner) Stop() {
 	select {
 	case r.cmdChan <- command{typ: cmdStop}:
 	case <-r.doneChan:
-		// Already stopped
 	}
 }
 
-// Cancel cancels the runner's context.
 func (r *JobRunner) Cancel() {
 	r.cancel()
 }

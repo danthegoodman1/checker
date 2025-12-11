@@ -21,10 +21,6 @@ func (r *Runtime) Type() runtime.RuntimeType {
 	return runtime.RuntimeTypeFirecracker
 }
 
-func (r *Runtime) CheckpointGracePeriodMs() int64 {
-	return 0
-}
-
 func (r *Runtime) ParseConfig(raw []byte) (any, error) {
 	return nil, fmt.Errorf("firecracker not supported on macOS")
 }

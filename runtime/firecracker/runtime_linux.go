@@ -63,25 +63,13 @@ type processHandle struct {
 	config         *Config
 	apiHostAddress string
 	logger         zerolog.Logger
-
-	// HTTP client for Firecracker API
-	httpClient *http.Client
-
-	// For capturing stdout/stderr
-	stdout io.Writer
-	stderr io.Writer
-
-	// Mutex for API calls
-	mu sync.Mutex
-
-	// Track if VM has been started
-	started bool
-
-	// TAP device name (for cleanup)
-	tapDeviceName string
-
-	// MAC address used for the guest
-	guestMAC string
+	httpClient     *http.Client
+	stdout         io.Writer
+	stderr         io.Writer
+	mu             sync.Mutex
+	started        bool
+	tapDeviceName  string
+	guestMAC       string
 }
 
 func (h *processHandle) String() string {
@@ -160,7 +148,6 @@ func (h *processHandle) waitForSocket(ctx context.Context, timeout time.Duration
 		}
 
 		if _, err := os.Stat(h.socketPath); err == nil {
-			// Socket file exists, try to connect
 			conn, err := net.Dial("unix", h.socketPath)
 			if err == nil {
 				conn.Close()
@@ -182,17 +169,14 @@ func (h *processHandle) Checkpoint(ctx context.Context, keepRunning bool) (runti
 		Bool("keep_running", keepRunning).
 		Msg("creating checkpoint")
 
-	// Ensure snapshot directory exists
 	if err := os.MkdirAll(h.snapshotDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create snapshot directory: %w", err)
 	}
 
-	// Pause the VM first
 	if err := h.apiPatch(ctx, "vm", map[string]string{"state": "Paused"}); err != nil {
 		return nil, fmt.Errorf("failed to pause VM: %w", err)
 	}
 
-	// Create snapshot
 	snapshotReq := map[string]any{
 		"snapshot_type": "Full",
 		"snapshot_path": snapshotFile,
@@ -267,7 +251,6 @@ func (h *processHandle) Wait(ctx context.Context) (int, error) {
 		return -1, ctx.Err()
 	case err := <-done:
 		if err != nil {
-			// Try to extract exit code
 			if exitErr, ok := err.(*exec.ExitError); ok {
 				exitCode := exitErr.ExitCode()
 				h.logger.Debug().Int("exit_code", exitCode).Msg("Firecracker VM exited with error")
@@ -283,17 +266,14 @@ func (h *processHandle) Wait(ctx context.Context) (int, error) {
 func (h *processHandle) Cleanup(ctx context.Context) error {
 	h.logger.Debug().Msg("cleaning up Firecracker VM")
 
-	// Kill the process if still running
 	if h.fcCmd != nil && h.fcCmd.Process != nil {
 		_ = h.fcCmd.Process.Kill()
 	}
 
-	// Remove socket file
 	if h.socketPath != "" {
 		_ = os.Remove(h.socketPath)
 	}
 
-	// Delete TAP device
 	if err := deleteTAPDevice(h.tapDeviceName); err != nil {
 		h.logger.Warn().Err(err).Str("tap", h.tapDeviceName).Msg("failed to delete TAP device")
 	} else {
@@ -311,7 +291,6 @@ func NewRuntime() (*Runtime, error) {
 		Str("platform", "linux").
 		Logger()
 
-	// Verify firecracker is available
 	cmd := exec.Command("firecracker", "--version")
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("firecracker not found: %w", err)
@@ -343,13 +322,11 @@ func generateTAPName(executionID string) string {
 // createTAPDevice creates a TAP device and attaches it to the specified bridge.
 // Returns the TAP device name.
 func createTAPDevice(tapName, bridgeName string) error {
-	// Create TAP device
 	cmd := exec.Command("ip", "tuntap", "add", tapName, "mode", "tap")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to create TAP device %s: %w, output: %s", tapName, err, string(output))
 	}
 
-	// Bring TAP device up
 	cmd = exec.Command("ip", "link", "set", tapName, "up")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		// Try to clean up the TAP device we created
@@ -357,7 +334,6 @@ func createTAPDevice(tapName, bridgeName string) error {
 		return fmt.Errorf("failed to bring up TAP device %s: %w, output: %s", tapName, err, string(output))
 	}
 
-	// Attach TAP device to bridge
 	cmd = exec.Command("ip", "link", "set", tapName, "master", bridgeName)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		// Try to clean up the TAP device we created
@@ -401,25 +377,21 @@ func copyFile(src, dst string) error {
 // injectEnvVars writes environment variables to /etc/checker.env in the ext4 rootfs.
 // The init script sources this file to set up the runtime environment.
 func injectEnvVars(rootfsPath string, env map[string]string) error {
-	// Create a temporary mount point
 	mountPoint, err := os.MkdirTemp("", "fc-rootfs-mount-")
 	if err != nil {
 		return fmt.Errorf("failed to create mount point: %w", err)
 	}
 	defer os.RemoveAll(mountPoint)
 
-	// Mount the ext4 filesystem
 	cmd := exec.Command("mount", "-o", "loop", rootfsPath, mountPoint)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to mount rootfs: %w, output: %s", err, string(output))
 	}
 
 	defer func() {
-		// Unmount when done
 		exec.Command("umount", mountPoint).Run()
 	}()
 
-	// Verify /etc exists
 	etcPath := filepath.Join(mountPoint, "etc")
 	if _, err := os.Stat(etcPath); os.IsNotExist(err) {
 		if err := os.MkdirAll(etcPath, 0755); err != nil {
@@ -427,7 +399,6 @@ func injectEnvVars(rootfsPath string, env map[string]string) error {
 		}
 	}
 
-	// Build the environment file content
 	var envContent bytes.Buffer
 	envContent.WriteString("# Runtime environment variables injected by Firecracker runtime\n")
 	for k, v := range env {
@@ -436,7 +407,6 @@ func injectEnvVars(rootfsPath string, env map[string]string) error {
 		envContent.WriteString(fmt.Sprintf("export %s=%s\n", k, escapedValue))
 	}
 
-	// Write to /etc/checker.env
 	envFilePath := filepath.Join(mountPoint, "etc", "checker.env")
 	if err := os.WriteFile(envFilePath, envContent.Bytes(), 0644); err != nil {
 		return fmt.Errorf("failed to write environment file: %w", err)
@@ -456,11 +426,6 @@ func escapeShellValue(s string) string {
 
 func (r *Runtime) Type() runtime.RuntimeType {
 	return runtime.RuntimeTypeFirecracker
-}
-
-func (r *Runtime) CheckpointGracePeriodMs() int64 {
-	// Firecracker snapshots are instant
-	return 0
 }
 
 func (r *Runtime) ParseConfig(raw []byte) (any, error) {
@@ -489,7 +454,6 @@ func (r *Runtime) Start(ctx context.Context, opts runtime.StartOptions) (runtime
 		Str("rootfs", cfg.RootfsPath).
 		Msg("starting Firecracker VM")
 
-	// Create work directory for this VM
 	workDir := filepath.Join(os.TempDir(), "checker", "firecracker-work", opts.ExecutionID)
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create work directory: %w", err)
@@ -501,9 +465,7 @@ func (r *Runtime) Start(ctx context.Context, opts runtime.StartOptions) (runtime
 		return nil, fmt.Errorf("failed to copy rootfs: %w", err)
 	}
 
-	// Build environment variables to inject
 	env := make(map[string]string)
-	// Copy user-provided env vars
 	for k, v := range opts.Env {
 		env[k] = v
 	}
@@ -511,23 +473,19 @@ func (r *Runtime) Start(ctx context.Context, opts runtime.StartOptions) (runtime
 	env["CHECKER_API_URL"] = opts.APIHostAddress
 	env["CHECKER_JOB_ID"] = opts.ExecutionID
 
-	// Inject environment variables into the rootfs
 	if err := injectEnvVars(workRootfs, env); err != nil {
 		return nil, fmt.Errorf("failed to inject environment variables: %w", err)
 	}
 
-	// Create a modified config with the working rootfs
 	workCfg := *cfg
 	workCfg.RootfsPath = workRootfs
 
-	// Snapshot directory is determined by the runtime
 	snapshotDir := filepath.Join(os.TempDir(), "checker", "firecracker-snapshots", opts.ExecutionID)
 
 	return r.startVM(ctx, opts.ExecutionID, &workCfg, snapshotDir, opts.APIHostAddress, opts.Stdout, opts.Stderr)
 }
 
 func (r *Runtime) startVM(ctx context.Context, executionID string, cfg *Config, snapshotDir string, apiHostAddress string, stdout, stderr io.Writer) (runtime.Process, error) {
-	// Create work directory for this VM
 	workDir := filepath.Join(os.TempDir(), "checker", "firecracker-work", executionID)
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create work directory: %w", err)
@@ -535,7 +493,6 @@ func (r *Runtime) startVM(ctx context.Context, executionID string, cfg *Config, 
 
 	socketPath := filepath.Join(workDir, "fc.sock")
 
-	// Create HTTP client that uses Unix socket
 	httpClient := &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
@@ -555,21 +512,18 @@ func (r *Runtime) startVM(ctx context.Context, executionID string, cfg *Config, 
 		return nil, fmt.Errorf("network config is required")
 	}
 
-	// Create TAP device
 	tapDeviceName := generateTAPName(executionID)
 	logger.Debug().
 		Str("tap", tapDeviceName).
 		Str("bridge", cfg.Network.BridgeName).
 		Msg("creating TAP device")
 
-	// Delete any stale TAP device with the same name (from crashed tests/runs)
 	_ = deleteTAPDevice(tapDeviceName)
 
 	if err := createTAPDevice(tapDeviceName, cfg.Network.BridgeName); err != nil {
 		return nil, fmt.Errorf("failed to create TAP device: %w", err)
 	}
 
-	// Generate MAC address if not provided
 	guestMAC := cfg.Network.GuestMAC
 	if guestMAC == "" {
 		var err error
@@ -581,7 +535,6 @@ func (r *Runtime) startVM(ctx context.Context, executionID string, cfg *Config, 
 	}
 	logger.Debug().Str("mac", guestMAC).Msg("using guest MAC address")
 
-	// Start Firecracker process
 	fcCmd := exec.CommandContext(ctx, "firecracker", "--api-sock", socketPath, "--level", "Error")
 	if stdout != nil {
 		fcCmd.Stdout = stdout
@@ -611,14 +564,12 @@ func (r *Runtime) startVM(ctx context.Context, executionID string, cfg *Config, 
 		guestMAC:       guestMAC,
 	}
 
-	// Wait for socket to be ready
 	if err := handle.waitForSocket(ctx, 5*time.Second); err != nil {
 		_ = fcCmd.Process.Kill()
 		_ = deleteTAPDevice(tapDeviceName)
 		return nil, fmt.Errorf("firecracker socket not ready: %w", err)
 	}
 
-	// Configure boot source
 	bootSource := map[string]string{
 		"kernel_image_path": cfg.KernelPath,
 		"boot_args":         cfg.BootArgs,
@@ -629,7 +580,6 @@ func (r *Runtime) startVM(ctx context.Context, executionID string, cfg *Config, 
 		return nil, fmt.Errorf("failed to configure boot source: %w", err)
 	}
 
-	// Configure root drive
 	rootDrive := map[string]any{
 		"drive_id":       "rootfs",
 		"path_on_host":   cfg.RootfsPath,
@@ -642,7 +592,6 @@ func (r *Runtime) startVM(ctx context.Context, executionID string, cfg *Config, 
 		return nil, fmt.Errorf("failed to configure root drive: %w", err)
 	}
 
-	// Configure machine
 	machineConfig := map[string]int{
 		"vcpu_count":   cfg.VcpuCount,
 		"mem_size_mib": cfg.MemSizeMib,
@@ -653,7 +602,6 @@ func (r *Runtime) startVM(ctx context.Context, executionID string, cfg *Config, 
 		return nil, fmt.Errorf("failed to configure machine: %w", err)
 	}
 
-	// Configure network interface (must be done BEFORE InstanceStart)
 	networkConfig := map[string]string{
 		"iface_id":      "eth0",
 		"guest_mac":     guestMAC,
@@ -669,7 +617,6 @@ func (r *Runtime) startVM(ctx context.Context, executionID string, cfg *Config, 
 		Str("mac", guestMAC).
 		Msg("configured network interface")
 
-	// Start the VM
 	if err := handle.api(ctx, "actions", map[string]string{"action_type": "InstanceStart"}); err != nil {
 		_ = fcCmd.Process.Kill()
 		_ = deleteTAPDevice(tapDeviceName)
@@ -702,7 +649,6 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 		return nil, fmt.Errorf("memory file not found: %w", err)
 	}
 
-	// Create work directory for this VM
 	workDir := filepath.Join(os.TempDir(), "checker", "firecracker-work", c.executionID)
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create work directory: %w", err)
@@ -710,10 +656,8 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 
 	socketPath := filepath.Join(workDir, "fc.sock")
 
-	// Remove old socket if it exists
 	_ = os.Remove(socketPath)
 
-	// Create HTTP client that uses Unix socket
 	httpClient := &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
@@ -728,12 +672,10 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 		Str("socket", socketPath).
 		Logger()
 
-	// Network config is required
 	if c.config.Network == nil {
 		return nil, fmt.Errorf("network config is required")
 	}
 
-	// Recreate TAP device
 	tapDeviceName := c.tapDeviceName
 	if tapDeviceName == "" {
 		tapDeviceName = generateTAPName(c.executionID)
@@ -743,14 +685,12 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 		Str("bridge", c.config.Network.BridgeName).
 		Msg("recreating TAP device for restore")
 
-	// Delete old TAP device if it exists (from previous run)
 	_ = deleteTAPDevice(tapDeviceName)
 
 	if err := createTAPDevice(tapDeviceName, c.config.Network.BridgeName); err != nil {
 		return nil, fmt.Errorf("failed to recreate TAP device: %w", err)
 	}
 
-	// Start Firecracker process
 	fcCmd := exec.CommandContext(ctx, "firecracker", "--api-sock", socketPath, "--level", "Error")
 	if opts.Stdout != nil {
 		fcCmd.Stdout = opts.Stdout
@@ -782,24 +722,20 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 		guestMAC:       c.guestMAC,
 	}
 
-	// Wait for socket to be ready
 	if err := handle.waitForSocket(ctx, 5*time.Second); err != nil {
 		_ = fcCmd.Process.Kill()
 		_ = deleteTAPDevice(tapDeviceName)
 		return nil, fmt.Errorf("firecracker socket not ready: %w", err)
 	}
 
-	// Load snapshot
-	// Note: Firecracker v1.10 expects the TAP device to exist with the same name
-	// as when the snapshot was created. We recreated it above with the same name.
 	loadReq := map[string]any{
 		"snapshot_path": c.snapshotPath,
 		"mem_backend": map[string]string{
 			"backend_type": "File",
 			"backend_path": c.memFilePath,
 		},
-		"enable_diff_snapshots": false,
-		"resume_vm":             true, // Resume immediately after loading
+		"track_dirty_pages": false,
+		"resume_vm":         true, // Resume immediately after loading
 	}
 
 	if err := handle.api(ctx, "snapshot/load", loadReq); err != nil {
@@ -808,7 +744,6 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 		return nil, fmt.Errorf("failed to load snapshot: %w", err)
 	}
 
-	// Note: resume_vm=true in the load request automatically resumes the VM
 	handle.started = true
 	logger.Debug().Msg("Firecracker VM restored from snapshot")
 
@@ -827,11 +762,9 @@ func (r *Runtime) ReconstructCheckpoint(checkpointPath string, executionID strin
 		return nil, fmt.Errorf("network config is required")
 	}
 
-	// Memory file is in the same directory with a different prefix
 	dir := filepath.Dir(checkpointPath)
 	memFilePath := filepath.Join(dir, fmt.Sprintf("mem-%s", executionID))
 
-	// Generate TAP name and MAC address for restore
 	tapDeviceName := generateTAPName(executionID)
 	guestMAC, err := GenerateMAC()
 	if err != nil {

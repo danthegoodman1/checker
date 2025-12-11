@@ -113,10 +113,4 @@ type Runtime interface {
 	// ReconstructCheckpoint rebuilds a Checkpoint from persisted data.
 	// This is used to restore suspended jobs from the database.
 	ReconstructCheckpoint(checkpointPath string, executionID string, env map[string]string, config any, apiHostAddress string) (Checkpoint, error)
-
-	// CheckpointGracePeriodMs returns the grace period in milliseconds that workers
-	// should wait after receiving a checkpoint response before the runtime stops the process.
-	// This allows the worker to be idle (no open connections) when stopped.
-	// Returns 0 if no grace period is needed (e.g., Linux with CRIU).
-	CheckpointGracePeriodMs() int64
 }

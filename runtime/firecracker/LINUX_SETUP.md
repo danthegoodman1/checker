@@ -14,8 +14,8 @@ Firecracker is a virtual machine monitor (VMM) that uses KVM to create and manag
 ```bash
 # Download latest Firecracker release
 ARCH=$(uname -m)
-FC_VERSION="v1.10.0"
-curl -fLo firecracker "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-${ARCH}.tgz" \
+FC_VERSION="v1.13.1"
+curl -fL "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-${ARCH}.tgz" \
   | tar -xz
 
 # Install to PATH
