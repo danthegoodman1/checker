@@ -220,22 +220,18 @@ func TestFirecrackerCheckpointRestore(t *testing.T) {
 		t.Skip("firecracker not found in PATH")
 	}
 
-	// Build a rootfs that waits for a trigger file, similar to fc-snapshot-test.sh
-	// Uses /dev/vdb as a trigger disk - when byte 0x01 is present, run the workload
+	// Build a rootfs that prints a counter, sleeps, then prints more
+	// We'll checkpoint during the sleep and verify it continues after restore
 	rootfsPath := buildTestRootfs(t, `
-echo "===SNAPSHOT_READY==="
-# Wait for trigger disk (vdb) to have magic byte 0x01
-while true; do
-    if [ -e /dev/vdb ]; then
-        BYTE=$(dd if=/dev/vdb bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' ')
-        if [ "$BYTE" = "01" ]; then
-            echo "Trigger received, running workload..."
-            echo "Result: 42"
-            break
-        fi
-    fi
-    sleep 0.01
-done
+echo "Starting counter..."
+echo "COUNT: 1"
+echo "COUNT: 2"
+echo "COUNT: 3"
+echo "===CHECKPOINT_NOW==="
+sleep 5
+echo "COUNT: 4"
+echo "COUNT: 5"
+echo "Done!"
 `)
 
 	// Create runtime
@@ -244,15 +240,6 @@ done
 	defer rt.Close()
 
 	executionID := fmt.Sprintf("test-checkpoint-%d", time.Now().UnixNano())
-	workDir := t.TempDir()
-
-	// Create trigger disk with 0x00 (don't run yet)
-	triggerDisk := filepath.Join(workDir, "trigger.img")
-	require.NoError(t, os.WriteFile(triggerDisk, []byte{0x00}, 0644))
-	// Pad to 4K
-	f, _ := os.OpenFile(triggerDisk, os.O_WRONLY|os.O_APPEND, 0644)
-	f.Write(make([]byte, 4095))
-	f.Close()
 
 	// Create config
 	cfg := &firecracker.Config{
@@ -278,17 +265,18 @@ done
 	})
 	require.NoError(t, err)
 
-	// Wait for SNAPSHOT_READY signal
-	t.Log("Waiting for VM to signal ready...")
-	deadline := time.Now().Add(10 * time.Second)
+	// Wait for CHECKPOINT_NOW signal (VM is in sleep)
+	t.Log("Waiting for VM to reach checkpoint point...")
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		if strings.Contains(stdout1.String(), "===SNAPSHOT_READY===") {
+		if strings.Contains(stdout1.String(), "===CHECKPOINT_NOW===") {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	require.Contains(t, stdout1.String(), "===SNAPSHOT_READY===", "VM did not signal ready")
-	t.Log("VM is ready for checkpoint")
+	require.Contains(t, stdout1.String(), "===CHECKPOINT_NOW===", "VM did not reach checkpoint point")
+	t.Log("VM reached checkpoint point")
+	t.Logf("Output before checkpoint:\n%s", stdout1.String())
 
 	// Create checkpoint (this pauses and kills the VM)
 	t.Log("Creating checkpoint...")
@@ -299,18 +287,8 @@ done
 	// Cleanup the first process
 	proc.Cleanup(ctx)
 
-	// Phase 2: Restore and complete
+	// Phase 2: Restore and verify it continues
 	t.Log("=== Phase 2: Restoring from checkpoint ===")
-
-	// Update trigger disk to have 0x01 (run workload)
-	triggerDiskRestore := filepath.Join(workDir, "trigger-restore.img")
-	triggerData := make([]byte, 4096)
-	triggerData[0] = 0x01
-	require.NoError(t, os.WriteFile(triggerDiskRestore, triggerData, 0644))
-
-	// For restore to work with the trigger disk, we'd need to reconfigure the VM
-	// This is a limitation - Firecracker snapshot/restore restores the exact VM state
-	// including disk paths. For now, just test the restore API works.
 
 	var stdout2 strings.Builder
 	t.Log("Restoring from checkpoint...")
@@ -319,23 +297,21 @@ done
 		Stdout:     &stdout2,
 		Stderr:     &stdout2,
 	})
-	if err != nil {
-		// Restore might fail if trigger disk mechanism doesn't work in this test setup
-		// This is expected - the full mechanism requires drive updates after restore
-		t.Logf("Restore failed (expected in simple test): %v", err)
-		t.Log("=== Firecracker checkpoint API test PASSED (restore needs drive update mechanism) ===")
-		return
-	}
+	require.NoError(t, err)
 
-	// If restore succeeded, wait for completion
+	// Wait for restored VM to complete
 	t.Log("Waiting for restored VM to complete...")
 	exitCode, err := proc2.Wait(ctx)
-	if err != nil {
-		t.Logf("Wait failed: %v", err)
-	}
+	require.NoError(t, err)
 
 	t.Logf("Restored VM stdout:\n%s", stdout2.String())
 	t.Logf("Exit code: %d", exitCode)
+
+	// Verify the restored VM continued from where it left off
+	// It should print COUNT: 4, COUNT: 5, and Done!
+	assert.Contains(t, stdout2.String(), "COUNT: 4", "Restored VM should continue counting")
+	assert.Contains(t, stdout2.String(), "COUNT: 5", "Restored VM should continue counting")
+	assert.Contains(t, stdout2.String(), "Done!", "Restored VM should complete")
 
 	proc2.Cleanup(ctx)
 
