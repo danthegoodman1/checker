@@ -15,7 +15,7 @@ UPDATE jobs SET
     state = $2,
     checkpoint_count = checkpoint_count + 1,
     last_checkpoint_at = $3,
-    suspend_until = $4,
+    resume_at = $4,
     checkpoint_path = $5
 WHERE id = $1;
 
@@ -31,13 +31,19 @@ WHERE id = $1;
 -- name: UpdateJobRetryCount :exec
 UPDATE jobs SET retry_count = $2 WHERE id = $1;
 
+-- name: UpdateJobPendingRetry :exec
+UPDATE jobs SET
+    state = 'pending_retry',
+    resume_at = $2
+WHERE id = $1;
+
 -- name: GetJob :one
 SELECT * FROM jobs WHERE id = $1;
 
--- name: GetSuspendedJobsToWake :many
+-- name: GetJobsToResume :many
 SELECT * FROM jobs
-WHERE state = 'suspended' AND suspend_until IS NOT NULL AND suspend_until <= $1
-ORDER BY suspend_until ASC
+WHERE state IN ('suspended', 'pending_retry') AND resume_at IS NOT NULL AND resume_at <= $1
+ORDER BY resume_at ASC
 LIMIT $2;
 
 -- name: GetNonTerminalJobs :many

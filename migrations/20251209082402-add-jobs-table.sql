@@ -1,6 +1,6 @@
 
 -- +migrate Up
-CREATE TYPE job_state AS ENUM ('pending', 'running', 'suspended', 'completed', 'failed');
+CREATE TYPE job_state AS ENUM ('pending', 'running', 'suspended', 'pending_retry', 'completed', 'failed');
 
 -- Job definitions table - stores registered job definitions for recovery
 CREATE TABLE job_definitions (
@@ -40,7 +40,7 @@ CREATE TABLE jobs (
     checkpoint_count INT NOT NULL DEFAULT 0,
     last_checkpoint_at TIMESTAMPTZ,
     retry_count INT NOT NULL DEFAULT 0,
-    suspend_until TIMESTAMPTZ,
+    resume_at TIMESTAMPTZ,  -- Used for both suspend wake and retry scheduling
 
     -- Checkpoint recovery data (needed to restore)
     checkpoint_path TEXT,
@@ -51,8 +51,8 @@ CREATE TABLE jobs (
     metadata JSONB NOT NULL DEFAULT '{}'
 );
 
--- Index for polling suspended jobs
-CREATE INDEX idx_jobs_suspend_until ON jobs (suspend_until) WHERE state = 'suspended' AND suspend_until IS NOT NULL;
+-- Index for polling jobs waiting to resume (suspended or pending_retry)
+CREATE INDEX idx_jobs_resume_at ON jobs (resume_at) WHERE (state = 'suspended' OR state = 'pending_retry') AND resume_at IS NOT NULL;
 
 -- Index for listing non-terminal jobs
 CREATE INDEX idx_jobs_state ON jobs (state) WHERE state NOT IN ('completed', 'failed');

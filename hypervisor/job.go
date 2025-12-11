@@ -29,6 +29,10 @@ const (
 	// Persisted to DB.
 	JobStateSuspended JobState = "suspended"
 
+	// JobStatePendingRetry means the job failed and is waiting to retry after a delay.
+	// Persisted to DB.
+	JobStatePendingRetry JobState = "pending_retry"
+
 	// JobStateExiting means the process has signaled exit, cleanup is in progress.
 	// Transient state, not persisted to DB.
 	JobStateExiting JobState = "exiting"
@@ -91,8 +95,8 @@ type Job struct {
 	// RetryCount tracks how many times this job has been retried.
 	RetryCount int
 
-	// SuspendUntil is set when the job is suspended and should wake at this time.
-	SuspendUntil *time.Time
+	// ResumeAt is set when the job is suspended or pending retry, and should resume at this time.
+	ResumeAt *time.Time
 
 	// Metadata holds arbitrary key-value metadata for filtering and identification.
 	Metadata map[string]string
@@ -159,9 +163,9 @@ func (j *Job) Clone() *Job {
 		t := *j.LastCheckpointAt
 		clone.LastCheckpointAt = &t
 	}
-	if j.SuspendUntil != nil {
-		t := *j.SuspendUntil
-		clone.SuspendUntil = &t
+	if j.ResumeAt != nil {
+		t := *j.ResumeAt
+		clone.ResumeAt = &t
 	}
 
 	return &clone

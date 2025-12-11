@@ -124,8 +124,8 @@ func TestCrashRecoveryHypervisor(t *testing.T) {
 
 		if dbJob.State == query.JobStateSuspended {
 			suspended = true
-			t.Logf("Job is now suspended (checkpoint_count=%d, suspend_until=%v)",
-				dbJob.CheckpointCount, dbJob.SuspendUntil.Time)
+			t.Logf("Job is now suspended (checkpoint_count=%d, resume_at=%v)",
+				dbJob.CheckpointCount, dbJob.ResumeAt.Time)
 			break
 		}
 		if dbJob.State == query.JobStateFailed {

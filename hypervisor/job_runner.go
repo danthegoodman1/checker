@@ -57,6 +57,12 @@ type commandResult struct {
 	err    error
 }
 
+// RetryDecision is returned by the failure callback to indicate whether to retry.
+type RetryDecision struct {
+	ShouldRetry bool
+	RetryDelay  time.Duration
+}
+
 // JobRunner manages the lifecycle of a single job using a state machine.
 type JobRunner struct {
 	job            *Job
@@ -91,15 +97,16 @@ type JobRunner struct {
 	// Track pending checkpoint requests for collapsing
 	pendingCheckpointRequests []chan<- commandResult
 
-	// Track when a retry is pending (failure callback is executing)
+	// Track when a retry is pending (scheduled via timer)
 	retryPending bool
 
 	// Context for cancellation
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// onFailure is called when the job fails, allowing retry logic
-	onFailure func(runner *JobRunner, exitCode int)
+	// onFailure is called when the job fails to determine retry behavior.
+	// It receives the job state and exit code, and returns a decision.
+	onFailure func(job *Job, exitCode int) RetryDecision
 
 	// Database pool for persisting state changes
 	pool *pgxpool.Pool
@@ -290,17 +297,7 @@ func (r *JobRunner) handleProcessExited(cmd command) {
 		}
 	}
 
-	// Persist to DB if no onFailure callback OR if succeeded
 	failed := r.job.State == JobStateFailed
-	if !failed || r.onFailure == nil {
-		var dbState query.JobState
-		if r.job.State == JobStateCompleted {
-			dbState = query.JobStateCompleted
-		} else {
-			dbState = query.JobStateFailed
-		}
-		r.persistJobCompleted(dbState, r.job.CompletedAt, r.job.Result, r.job.Error)
-	}
 
 	// Cleanup process
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -309,14 +306,46 @@ func (r *JobRunner) handleProcessExited(cmd command) {
 		r.logger.Error().Err(cleanupErr).Msg("failed to cleanup process")
 	}
 
-	// Call failure callback if applicable
-	// NOTE: Must be async to avoid deadlock - onFailure may call GetState/Retry
-	// which send commands back to this command loop
+	// Check if we should retry (callback decides based on job state)
 	if failed && r.onFailure != nil {
-		r.retryPending = true
-		go r.onFailure(r, cmd.exitCode)
+		decision := r.onFailure(r.job.Clone(), cmd.exitCode)
+		if decision.ShouldRetry {
+			if decision.RetryDelay > 0 {
+				// Persist to DB as pending_retry - the resume poller will handle it
+				resumeAt := time.Now().Add(decision.RetryDelay)
+				r.job.State = JobStatePendingRetry
+				r.job.ResumeAt = &resumeAt
+				r.persistJobPendingRetry(resumeAt)
+				r.logger.Info().
+					Time("resume_at", resumeAt).
+					Dur("retry_delay", decision.RetryDelay).
+					Msg("job scheduled for retry")
+			} else {
+				// Retry immediately via command (processed after this handler returns)
+				r.retryPending = true
+				go func() {
+					select {
+					case r.cmdChan <- command{typ: cmdRetry, ctx: r.ctx}:
+					case <-r.doneChan:
+						// Runner already stopped
+					}
+				}()
+			}
+			return
+		}
+		// No retry - persist failed state
+		r.persistJobCompleted(query.JobStateFailed, r.job.CompletedAt, r.job.Result, r.job.Error)
 		return
 	}
+
+	// No failure callback or job succeeded - persist to DB
+	var dbState query.JobState
+	if r.job.State == JobStateCompleted {
+		dbState = query.JobStateCompleted
+	} else {
+		dbState = query.JobStateFailed
+	}
+	r.persistJobCompleted(dbState, r.job.CompletedAt, r.job.Result, r.job.Error)
 }
 
 // handleCheckpoint handles a checkpoint request
@@ -377,8 +406,8 @@ func (r *JobRunner) handleCheckpoint(cmd command) {
 	now := time.Now()
 	r.job.LastCheckpointAt = &now
 	if !keepRunning {
-		suspendUntil := now.Add(cmd.suspendDuration)
-		r.job.SuspendUntil = &suspendUntil
+		resumeAt := now.Add(cmd.suspendDuration)
+		r.job.ResumeAt = &resumeAt
 	}
 
 	// Perform checkpoint
@@ -387,7 +416,7 @@ func (r *JobRunner) handleCheckpoint(cmd command) {
 		// Revert state on failure
 		r.job.CheckpointCount--
 		r.job.State = JobStateRunning
-		r.job.SuspendUntil = nil
+		r.job.ResumeAt = nil
 
 		checkpointErr := fmt.Errorf("checkpoint failed: %w", err)
 		if cmd.resultChan != nil {
@@ -418,13 +447,13 @@ func (r *JobRunner) handleCheckpoint(cmd command) {
 	if !keepRunning {
 		dbState = query.JobStateSuspended
 	}
-	if dbErr := r.persistJobCheckpointedWithError(dbState, *r.job.LastCheckpointAt, r.job.SuspendUntil, checkpoint.Path()); dbErr != nil {
+	if dbErr := r.persistJobCheckpointedWithError(dbState, *r.job.LastCheckpointAt, r.job.ResumeAt, checkpoint.Path()); dbErr != nil {
 		r.logger.Error().Err(dbErr).Msg("CRITICAL: checkpoint succeeded but DB persist failed")
 	}
 
 	// Schedule wake timer if suspended
-	if !keepRunning && r.job.SuspendUntil != nil {
-		r.scheduleSuspendWake(*r.job.SuspendUntil)
+	if !keepRunning && r.job.ResumeAt != nil {
+		r.scheduleSuspendWake(*r.job.ResumeAt)
 	}
 
 	// Notify original requester
@@ -479,7 +508,7 @@ func (r *JobRunner) handleWake(cmd command) {
 	}
 
 	r.job.State = JobStateRunning
-	r.job.SuspendUntil = nil
+	r.job.ResumeAt = nil
 
 	r.persistJobState(query.JobStateRunning)
 
@@ -681,8 +710,8 @@ func (r *JobRunner) handleRetry(cmd command) {
 	// Clear retry pending flag - we're handling the retry now
 	r.retryPending = false
 
-	// Can only retry from Failed state
-	if r.job.State != JobStateFailed {
+	// Can only retry from Failed or PendingRetry state
+	if r.job.State != JobStateFailed && r.job.State != JobStatePendingRetry {
 		if cmd.resultChan != nil {
 			cmd.resultChan <- commandResult{err: fmt.Errorf("can only retry failed jobs, current state: %s", r.job.State)}
 		}
@@ -731,7 +760,7 @@ func (r *JobRunner) handleRetry(cmd command) {
 
 		r.process = process
 		r.job.State = JobStateRunning
-		r.job.SuspendUntil = nil
+		r.job.ResumeAt = nil
 
 		now := time.Now()
 		if dbErr := query.ReliableExec(r.ctx, r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
@@ -1036,19 +1065,8 @@ func (r *JobRunner) Cancel() {
 }
 
 // SetOnFailure sets the callback for when the job fails.
-func (r *JobRunner) SetOnFailure(fn func(runner *JobRunner, exitCode int)) {
+func (r *JobRunner) SetOnFailure(fn func(job *Job, exitCode int) RetryDecision) {
 	r.onFailure = fn
-}
-
-// MarkDone closes the done channel (called externally when needed).
-func (r *JobRunner) MarkDone() {
-	// This will be handled by the command loop exiting
-	r.cancel()
-}
-
-// MarkFailed persists the failed state to DB.
-func (r *JobRunner) MarkFailed() {
-	r.persistJobCompleted(query.JobStateFailed, r.job.CompletedAt, r.job.Result, r.job.Error)
 }
 
 // SetCheckpoint sets the checkpoint for restoration (used during recovery).
@@ -1100,10 +1118,10 @@ func (r *JobRunner) persistJobCompleted(state query.JobState, completedAt *time.
 	}
 }
 
-func (r *JobRunner) persistJobCheckpointedWithError(state query.JobState, lastCheckpointAt time.Time, suspendUntil *time.Time, checkpointPath string) error {
-	var suspendUntilSQL sql.NullTime
-	if suspendUntil != nil {
-		suspendUntilSQL = sql.NullTime{Time: *suspendUntil, Valid: true}
+func (r *JobRunner) persistJobCheckpointedWithError(state query.JobState, lastCheckpointAt time.Time, resumeAt *time.Time, checkpointPath string) error {
+	var resumeAtSQL sql.NullTime
+	if resumeAt != nil {
+		resumeAtSQL = sql.NullTime{Time: *resumeAt, Valid: true}
 	}
 
 	if dbErr := query.ReliableExecInTx(r.ctx, r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
@@ -1111,7 +1129,7 @@ func (r *JobRunner) persistJobCheckpointedWithError(state query.JobState, lastCh
 			ID:               r.job.ID,
 			State:            state,
 			LastCheckpointAt: sql.NullTime{Time: lastCheckpointAt, Valid: true},
-			SuspendUntil:     suspendUntilSQL,
+			ResumeAt:         resumeAtSQL,
 			CheckpointPath:   sql.NullString{String: checkpointPath, Valid: checkpointPath != ""},
 		})
 	}); dbErr != nil {
@@ -1129,6 +1147,17 @@ func (r *JobRunner) persistJobRetryCount(retryCount int) {
 		})
 	}); dbErr != nil {
 		r.logger.Error().Err(dbErr).Msg("failed to persist job retry count to DB")
+	}
+}
+
+func (r *JobRunner) persistJobPendingRetry(resumeAt time.Time) {
+	if dbErr := query.ReliableExecInTx(r.ctx, r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		return q.UpdateJobPendingRetry(ctx, query.UpdateJobPendingRetryParams{
+			ID:       r.job.ID,
+			ResumeAt: sql.NullTime{Time: resumeAt, Valid: true},
+		})
+	}); dbErr != nil {
+		r.logger.Error().Err(dbErr).Msg("failed to persist job pending_retry state to DB")
 	}
 }
 

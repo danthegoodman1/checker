@@ -14,7 +14,7 @@ import (
 )
 
 const getJob = `-- name: GetJob :one
-SELECT id, definition_name, definition_version, state, env, params, result_exit_code, result_output, error, created_at, started_at, completed_at, checkpoint_count, last_checkpoint_at, retry_count, suspend_until, checkpoint_path, runtime_type, runtime_config, metadata FROM jobs WHERE id = $1
+SELECT id, definition_name, definition_version, state, env, params, result_exit_code, result_output, error, created_at, started_at, completed_at, checkpoint_count, last_checkpoint_at, retry_count, resume_at, checkpoint_path, runtime_type, runtime_config, metadata FROM jobs WHERE id = $1
 `
 
 func (q *Queries) GetJob(ctx context.Context, id string) (Job, error) {
@@ -36,7 +36,7 @@ func (q *Queries) GetJob(ctx context.Context, id string) (Job, error) {
 		&i.CheckpointCount,
 		&i.LastCheckpointAt,
 		&i.RetryCount,
-		&i.SuspendUntil,
+		&i.ResumeAt,
 		&i.CheckpointPath,
 		&i.RuntimeType,
 		&i.RuntimeConfig,
@@ -45,8 +45,61 @@ func (q *Queries) GetJob(ctx context.Context, id string) (Job, error) {
 	return i, err
 }
 
+const getJobsToResume = `-- name: GetJobsToResume :many
+SELECT id, definition_name, definition_version, state, env, params, result_exit_code, result_output, error, created_at, started_at, completed_at, checkpoint_count, last_checkpoint_at, retry_count, resume_at, checkpoint_path, runtime_type, runtime_config, metadata FROM jobs
+WHERE state IN ('suspended', 'pending_retry') AND resume_at IS NOT NULL AND resume_at <= $1
+ORDER BY resume_at ASC
+LIMIT $2
+`
+
+type GetJobsToResumeParams struct {
+	ResumeAt sql.NullTime
+	Limit    int32
+}
+
+func (q *Queries) GetJobsToResume(ctx context.Context, arg GetJobsToResumeParams) ([]Job, error) {
+	rows, err := q.db.Query(ctx, getJobsToResume, arg.ResumeAt, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Job
+	for rows.Next() {
+		var i Job
+		if err := rows.Scan(
+			&i.ID,
+			&i.DefinitionName,
+			&i.DefinitionVersion,
+			&i.State,
+			&i.Env,
+			&i.Params,
+			&i.ResultExitCode,
+			&i.ResultOutput,
+			&i.Error,
+			&i.CreatedAt,
+			&i.StartedAt,
+			&i.CompletedAt,
+			&i.CheckpointCount,
+			&i.LastCheckpointAt,
+			&i.RetryCount,
+			&i.ResumeAt,
+			&i.CheckpointPath,
+			&i.RuntimeType,
+			&i.RuntimeConfig,
+			&i.Metadata,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getNonTerminalJobs = `-- name: GetNonTerminalJobs :many
-SELECT id, definition_name, definition_version, state, env, params, result_exit_code, result_output, error, created_at, started_at, completed_at, checkpoint_count, last_checkpoint_at, retry_count, suspend_until, checkpoint_path, runtime_type, runtime_config, metadata FROM jobs WHERE state NOT IN ('completed', 'failed')
+SELECT id, definition_name, definition_version, state, env, params, result_exit_code, result_output, error, created_at, started_at, completed_at, checkpoint_count, last_checkpoint_at, retry_count, resume_at, checkpoint_path, runtime_type, runtime_config, metadata FROM jobs WHERE state NOT IN ('completed', 'failed')
 `
 
 func (q *Queries) GetNonTerminalJobs(ctx context.Context) ([]Job, error) {
@@ -74,60 +127,7 @@ func (q *Queries) GetNonTerminalJobs(ctx context.Context) ([]Job, error) {
 			&i.CheckpointCount,
 			&i.LastCheckpointAt,
 			&i.RetryCount,
-			&i.SuspendUntil,
-			&i.CheckpointPath,
-			&i.RuntimeType,
-			&i.RuntimeConfig,
-			&i.Metadata,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const getSuspendedJobsToWake = `-- name: GetSuspendedJobsToWake :many
-SELECT id, definition_name, definition_version, state, env, params, result_exit_code, result_output, error, created_at, started_at, completed_at, checkpoint_count, last_checkpoint_at, retry_count, suspend_until, checkpoint_path, runtime_type, runtime_config, metadata FROM jobs
-WHERE state = 'suspended' AND suspend_until IS NOT NULL AND suspend_until <= $1
-ORDER BY suspend_until ASC
-LIMIT $2
-`
-
-type GetSuspendedJobsToWakeParams struct {
-	SuspendUntil sql.NullTime
-	Limit        int32
-}
-
-func (q *Queries) GetSuspendedJobsToWake(ctx context.Context, arg GetSuspendedJobsToWakeParams) ([]Job, error) {
-	rows, err := q.db.Query(ctx, getSuspendedJobsToWake, arg.SuspendUntil, arg.Limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []Job
-	for rows.Next() {
-		var i Job
-		if err := rows.Scan(
-			&i.ID,
-			&i.DefinitionName,
-			&i.DefinitionVersion,
-			&i.State,
-			&i.Env,
-			&i.Params,
-			&i.ResultExitCode,
-			&i.ResultOutput,
-			&i.Error,
-			&i.CreatedAt,
-			&i.StartedAt,
-			&i.CompletedAt,
-			&i.CheckpointCount,
-			&i.LastCheckpointAt,
-			&i.RetryCount,
-			&i.SuspendUntil,
+			&i.ResumeAt,
 			&i.CheckpointPath,
 			&i.RuntimeType,
 			&i.RuntimeConfig,
@@ -180,7 +180,7 @@ func (q *Queries) InsertJob(ctx context.Context, arg InsertJobParams) error {
 }
 
 const listJobs = `-- name: ListJobs :many
-SELECT id, definition_name, definition_version, state, env, params, result_exit_code, result_output, error, created_at, started_at, completed_at, checkpoint_count, last_checkpoint_at, retry_count, suspend_until, checkpoint_path, runtime_type, runtime_config, metadata FROM jobs
+SELECT id, definition_name, definition_version, state, env, params, result_exit_code, result_output, error, created_at, started_at, completed_at, checkpoint_count, last_checkpoint_at, retry_count, resume_at, checkpoint_path, runtime_type, runtime_config, metadata FROM jobs
 WHERE ($2::TIMESTAMPTZ IS NULL OR
        (created_at, id) < ($2::TIMESTAMPTZ, $3::TEXT))
 ORDER BY created_at DESC, id DESC
@@ -218,7 +218,7 @@ func (q *Queries) ListJobs(ctx context.Context, arg ListJobsParams) ([]Job, erro
 			&i.CheckpointCount,
 			&i.LastCheckpointAt,
 			&i.RetryCount,
-			&i.SuspendUntil,
+			&i.ResumeAt,
 			&i.CheckpointPath,
 			&i.RuntimeType,
 			&i.RuntimeConfig,
@@ -239,7 +239,7 @@ UPDATE jobs SET
     state = $2,
     checkpoint_count = checkpoint_count + 1,
     last_checkpoint_at = $3,
-    suspend_until = $4,
+    resume_at = $4,
     checkpoint_path = $5
 WHERE id = $1
 `
@@ -248,7 +248,7 @@ type UpdateJobCheckpointedParams struct {
 	ID               string
 	State            JobState
 	LastCheckpointAt sql.NullTime
-	SuspendUntil     sql.NullTime
+	ResumeAt         sql.NullTime
 	CheckpointPath   sql.NullString
 }
 
@@ -257,7 +257,7 @@ func (q *Queries) UpdateJobCheckpointed(ctx context.Context, arg UpdateJobCheckp
 		arg.ID,
 		arg.State,
 		arg.LastCheckpointAt,
-		arg.SuspendUntil,
+		arg.ResumeAt,
 		arg.CheckpointPath,
 	)
 	return err
@@ -291,6 +291,23 @@ func (q *Queries) UpdateJobCompleted(ctx context.Context, arg UpdateJobCompleted
 		arg.ResultOutput,
 		arg.Error,
 	)
+	return err
+}
+
+const updateJobPendingRetry = `-- name: UpdateJobPendingRetry :exec
+UPDATE jobs SET
+    state = 'pending_retry',
+    resume_at = $2
+WHERE id = $1
+`
+
+type UpdateJobPendingRetryParams struct {
+	ID       string
+	ResumeAt sql.NullTime
+}
+
+func (q *Queries) UpdateJobPendingRetry(ctx context.Context, arg UpdateJobPendingRetryParams) error {
+	_, err := q.db.Exec(ctx, updateJobPendingRetry, arg.ID, arg.ResumeAt)
 	return err
 }
 
