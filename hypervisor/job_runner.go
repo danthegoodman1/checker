@@ -155,6 +155,14 @@ func (r *JobRunner) commandLoop() {
 				return
 			}
 
+			// Exit if job is pending_retry with a delay - the resume poller will handle it
+			// The runner should be evicted from memory so the poller can pick up the job
+			if r.job.State == JobStatePendingRetry {
+				r.notifyWaiters()
+				r.drainRemainingCommands()
+				return
+			}
+
 		case <-r.ctx.Done():
 			r.drainRemainingCommands()
 			return
