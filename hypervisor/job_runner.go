@@ -800,27 +800,55 @@ func (r *JobRunner) notifyWaiters() {
 // Start starts the job process.
 func (r *JobRunner) Start() error {
 	resultChan := make(chan commandResult, 1)
-	r.cmdChan <- command{typ: cmdStart, ctx: r.ctx, resultChan: resultChan}
-	result := <-resultChan
-	return result.err
+	select {
+	case r.cmdChan <- command{typ: cmdStart, ctx: r.ctx, resultChan: resultChan}:
+	case <-r.doneChan:
+		return fmt.Errorf("job runner stopped")
+	}
+
+	select {
+	case result := <-resultChan:
+		return result.err
+	case <-r.doneChan:
+		return fmt.Errorf("job runner stopped")
+	}
 }
 
 // Retry restarts the job with incremented retry count.
 func (r *JobRunner) Retry() error {
 	resultChan := make(chan commandResult, 1)
-	r.cmdChan <- command{typ: cmdRetry, ctx: r.ctx, resultChan: resultChan}
-	result := <-resultChan
-	return result.err
+	select {
+	case r.cmdChan <- command{typ: cmdRetry, ctx: r.ctx, resultChan: resultChan}:
+	case <-r.doneChan:
+		return fmt.Errorf("job runner stopped")
+	}
+
+	select {
+	case result := <-resultChan:
+		return result.err
+	case <-r.doneChan:
+		return fmt.Errorf("job runner stopped")
+	}
 }
 
 // GetState returns the current job state.
 func (r *JobRunner) GetState(ctx context.Context) (*Job, error) {
 	resultChan := make(chan commandResult, 1)
-	r.cmdChan <- command{typ: cmdGetState, ctx: ctx, resultChan: resultChan}
+	select {
+	case r.cmdChan <- command{typ: cmdGetState, ctx: ctx, resultChan: resultChan}:
+	case <-r.doneChan:
+		// Runner is done, return current job state
+		return r.job.Clone(), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 
 	select {
 	case result := <-resultChan:
 		return result.job, result.err
+	case <-r.doneChan:
+		// Runner finished while waiting, return current job state
+		return r.job.Clone(), nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -829,17 +857,25 @@ func (r *JobRunner) GetState(ctx context.Context) (*Job, error) {
 // Checkpoint requests a checkpoint of the job.
 func (r *JobRunner) Checkpoint(ctx context.Context, suspendDuration time.Duration, token string) (*Job, error) {
 	resultChan := make(chan commandResult, 1)
-	r.cmdChan <- command{
+	select {
+	case r.cmdChan <- command{
 		typ:             cmdCheckpoint,
 		ctx:             ctx,
 		resultChan:      resultChan,
 		suspendDuration: suspendDuration,
 		token:           token,
+	}:
+	case <-r.doneChan:
+		return nil, fmt.Errorf("job runner stopped")
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 
 	select {
 	case result := <-resultChan:
 		return result.job, result.err
+	case <-r.doneChan:
+		return nil, fmt.Errorf("job runner stopped")
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -848,11 +884,20 @@ func (r *JobRunner) Checkpoint(ctx context.Context, suspendDuration time.Duratio
 // Kill terminates the job.
 func (r *JobRunner) Kill(ctx context.Context) (*Job, error) {
 	resultChan := make(chan commandResult, 1)
-	r.cmdChan <- command{typ: cmdKill, ctx: ctx, resultChan: resultChan}
+	select {
+	case r.cmdChan <- command{typ: cmdKill, ctx: ctx, resultChan: resultChan}:
+	case <-r.doneChan:
+		// Already done, return current state
+		return r.job.Clone(), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 
 	select {
 	case result := <-resultChan:
 		return result.job, result.err
+	case <-r.doneChan:
+		return r.job.Clone(), nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -861,17 +906,26 @@ func (r *JobRunner) Kill(ctx context.Context) (*Job, error) {
 // Exit marks the job as completed with a result (called by runtime API).
 func (r *JobRunner) Exit(ctx context.Context, exitCode int, output json.RawMessage) error {
 	resultChan := make(chan commandResult, 1)
-	r.cmdChan <- command{
+	select {
+	case r.cmdChan <- command{
 		typ:        cmdExit,
 		ctx:        ctx,
 		resultChan: resultChan,
 		exitCode:   exitCode,
 		exitOutput: output,
+	}:
+	case <-r.doneChan:
+		// Already done
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 
 	select {
 	case result := <-resultChan:
 		return result.err
+	case <-r.doneChan:
+		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -880,11 +934,19 @@ func (r *JobRunner) Exit(ctx context.Context, exitCode int, output json.RawMessa
 // TakeLock takes a checkpoint lock, preventing checkpointing until released.
 func (r *JobRunner) TakeLock(ctx context.Context) (string, error) {
 	resultChan := make(chan commandResult, 1)
-	r.cmdChan <- command{typ: cmdTakeLock, ctx: ctx, resultChan: resultChan}
+	select {
+	case r.cmdChan <- command{typ: cmdTakeLock, ctx: ctx, resultChan: resultChan}:
+	case <-r.doneChan:
+		return "", fmt.Errorf("job runner stopped")
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
 
 	select {
 	case result := <-resultChan:
 		return result.lockID, result.err
+	case <-r.doneChan:
+		return "", fmt.Errorf("job runner stopped")
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
@@ -893,11 +955,20 @@ func (r *JobRunner) TakeLock(ctx context.Context) (string, error) {
 // ReleaseLock releases a previously taken checkpoint lock.
 func (r *JobRunner) ReleaseLock(ctx context.Context, lockID string) error {
 	resultChan := make(chan commandResult, 1)
-	r.cmdChan <- command{typ: cmdReleaseLock, ctx: ctx, resultChan: resultChan, lockID: lockID}
+	select {
+	case r.cmdChan <- command{typ: cmdReleaseLock, ctx: ctx, resultChan: resultChan, lockID: lockID}:
+	case <-r.doneChan:
+		// Job is done, lock doesn't matter anymore
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 
 	select {
 	case result := <-resultChan:
 		return result.err
+	case <-r.doneChan:
+		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -916,10 +987,19 @@ func (r *JobRunner) WaitForResult() <-chan struct{} {
 
 	waitChan := make(chan struct{})
 	resultChan := make(chan commandResult, 1)
-	r.cmdChan <- command{typ: cmdWaitForResult, resultChan: resultChan}
+
+	select {
+	case r.cmdChan <- command{typ: cmdWaitForResult, resultChan: resultChan}:
+	case <-r.doneChan:
+		close(waitChan)
+		return waitChan
+	}
 
 	go func() {
-		<-resultChan
+		select {
+		case <-resultChan:
+		case <-r.doneChan:
+		}
 		close(waitChan)
 	}()
 
@@ -933,7 +1013,11 @@ func (r *JobRunner) Done() <-chan struct{} {
 
 // Stop gracefully stops the runner.
 func (r *JobRunner) Stop() {
-	r.cmdChan <- command{typ: cmdStop}
+	select {
+	case r.cmdChan <- command{typ: cmdStop}:
+	case <-r.doneChan:
+		// Already stopped
+	}
 }
 
 // Cancel cancels the runner's context.
