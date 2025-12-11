@@ -1126,6 +1126,9 @@ func (h *Hypervisor) wakeJob(ctx context.Context, dbJob query.Job) error {
 
 	job := dbJobToJob(dbJob)
 
+	// Ensure job state is suspended for wake to work (may be 'running' if crashed mid-execution)
+	job.State = JobStateSuspended
+
 	if !dbJob.CheckpointPath.Valid || dbJob.CheckpointPath.String == "" {
 		return fmt.Errorf("no checkpoint path for suspended job")
 	}
