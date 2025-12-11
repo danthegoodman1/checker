@@ -10,18 +10,39 @@ type JobState string
 
 const (
 	// JobStatePending means the job has been created but not yet started.
+	// Persisted to DB.
 	JobStatePending JobState = "pending"
 
 	// JobStateRunning means the job is currently running.
+	// Persisted to DB.
 	JobStateRunning JobState = "running"
 
+	// JobStateRestarting means the job is transitioning from failed to running (retry).
+	// Transient state, not persisted to DB.
+	JobStateRestarting JobState = "restarting"
+
+	// JobStateCheckpointing means a checkpoint operation is in progress.
+	// Transient state, not persisted to DB.
+	JobStateCheckpointing JobState = "checkpointing"
+
 	// JobStateSuspended means the job is suspended (checkpointed + scheduled for later wake).
+	// Persisted to DB.
 	JobStateSuspended JobState = "suspended"
 
+	// JobStateExiting means the process has signaled exit, cleanup is in progress.
+	// Transient state, not persisted to DB.
+	JobStateExiting JobState = "exiting"
+
+	// JobStateTerminating means kill was requested, waiting for process to stop.
+	// Transient state, not persisted to DB.
+	JobStateTerminating JobState = "terminating"
+
 	// JobStateCompleted means the job finished successfully.
+	// Persisted to DB (terminal state).
 	JobStateCompleted JobState = "completed"
 
 	// JobStateFailed means the job failed or crashed.
+	// Persisted to DB (terminal state).
 	JobStateFailed JobState = "failed"
 )
 
@@ -151,7 +172,35 @@ func (j *Job) IsTerminal() bool {
 	return j.State == JobStateCompleted || j.State == JobStateFailed
 }
 
-// IsRunning returns true if the job is actively running (not suspended).
+// IsRunning returns true if the job is actively running (including transient active states).
 func (j *Job) IsRunning() bool {
-	return j.State == JobStateRunning
+	switch j.State {
+	case JobStateRunning, JobStateCheckpointing, JobStateExiting, JobStateTerminating:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsTransient returns true if the job is in a transient state (not persisted to DB).
+func (j *Job) IsTransient() bool {
+	switch j.State {
+	case JobStateRestarting, JobStateCheckpointing, JobStateExiting, JobStateTerminating:
+		return true
+	default:
+		return false
+	}
+}
+
+// PersistableState returns the DB-persistable state for a job.
+// Transient states are mapped to their logical DB equivalent.
+func (j *Job) PersistableState() JobState {
+	switch j.State {
+	case JobStateRestarting:
+		return JobStatePending
+	case JobStateCheckpointing, JobStateExiting, JobStateTerminating:
+		return JobStateRunning
+	default:
+		return j.State
+	}
 }

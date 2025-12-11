@@ -995,7 +995,7 @@ func (h *Hypervisor) scheduleJobWake(ctx context.Context, dbJob query.Job) error
 	}
 
 	runner := NewJobRunner(job, jd, rt, jd.Config, h.runtimeHTTPAddress, h.pool, nil, nil)
-	runner.checkpoint = checkpoint
+	runner.SetCheckpoint(checkpoint)
 
 	runner.SetOnFailure(func(r *JobRunner, exitCode int) {
 		job, _ := r.GetState(r.ctx)
@@ -1029,7 +1029,7 @@ func (h *Hypervisor) scheduleJobWake(ctx context.Context, dbJob query.Job) error
 	h.runners[dbJob.ID] = runner
 	h.runnersMu.Unlock()
 
-	runner.scheduleSuspendWake(dbJob.SuspendUntil.Time)
+	runner.ScheduleSuspendWake(dbJob.SuspendUntil.Time)
 
 	// Start eviction goroutine
 	go func() {
@@ -1249,7 +1249,7 @@ func (h *Hypervisor) wakeJob(ctx context.Context, dbJob query.Job) error {
 	}
 
 	runner := NewJobRunner(job, jd, rt, jd.Config, h.runtimeHTTPAddress, h.pool, nil, nil)
-	runner.checkpoint = checkpoint
+	runner.SetCheckpoint(checkpoint)
 
 	runner.SetOnFailure(func(r *JobRunner, exitCode int) {
 		job, _ := r.GetState(r.ctx)
@@ -1286,41 +1286,34 @@ func (h *Hypervisor) wakeJob(ctx context.Context, dbJob query.Job) error {
 		}
 	})
 
-	// Add to runners map BEFORE restore so that checkpoint requests from the
-	// restored container can find the runner. The Checkpoint method will wait
-	// for process to be set via the processReady channel.
+	// Add to runners map BEFORE sending wake command
 	h.runnersMu.Lock()
 	h.runners[dbJob.ID] = runner
 	h.runnersMu.Unlock()
 
-	process, err := rt.Restore(ctx, runtime.RestoreOptions{
-		Checkpoint: checkpoint,
-		Stdout:     os.Stdout, // TODO: Support stdout/stderr for restored jobs
-		Stderr:     os.Stderr,
-	})
-	if err != nil {
-		// Cancel runner context to unblock any pending checkpoint requests
-		runner.Cancel()
+	// Send wake command to restore from checkpoint via the command loop
+	resultChan := make(chan commandResult, 1)
+	runner.cmdChan <- command{typ: cmdWake, ctx: ctx, resultChan: resultChan}
 
+	select {
+	case result := <-resultChan:
+		if result.err != nil {
+			// Cancel runner and remove from map
+			runner.Cancel()
+			h.runnersMu.Lock()
+			delete(h.runners, dbJob.ID)
+			h.runnersMu.Unlock()
+			return fmt.Errorf("failed to wake job: %w", result.err)
+		}
+	case <-ctx.Done():
+		runner.Cancel()
 		h.runnersMu.Lock()
 		delete(h.runners, dbJob.ID)
 		h.runnersMu.Unlock()
-
-		runner.persistJobCompleted(query.JobStateFailed, utils.Ptr(time.Now()), nil, fmt.Sprintf("failed to restore: %v", err))
-		return fmt.Errorf("failed to restore from checkpoint: %w", err)
+		return ctx.Err()
 	}
 
-	runner.process = process
-	runner.signalProcessReady()
-
-	runner.jobMu.Lock()
-	runner.job.State = JobStateRunning
-	runner.job.SuspendUntil = nil
-	runner.jobMu.Unlock()
-	runner.persistJobState(query.JobStateRunning)
-
-	go runner.waitForExit()
-
+	// Start eviction goroutine
 	go func() {
 		<-runner.Done()
 		job, err := runner.GetState(h.ctx)
