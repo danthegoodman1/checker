@@ -618,3 +618,208 @@ func TestFirecrackerProcessCrashRestoreFromCheckpoint(t *testing.T) {
 	_, _ = pool.Exec(ctx, "DELETE FROM jobs WHERE id = $1", jobID)
 	_, _ = pool.Exec(ctx, "DELETE FROM job_definitions WHERE name = $1", "fc-process-crash-checkpoint-test")
 }
+
+// TestFirecrackerFullSystemCrashWhileRunning tests recovery when BOTH the hypervisor AND
+// the Firecracker VM crash simultaneously while the job is running (after checkpoint).
+//
+// This simulates a catastrophic failure like power loss or OOM kill affecting the whole system.
+//
+// This test:
+// 1. Starts a hypervisor and spawns a job
+// 2. Job checkpoints with keep_running=true (VM continues running)
+// 3. Kills the Firecracker process AND crashes the hypervisor
+// 4. Starts a NEW hypervisor and recovers from checkpoint
+// 5. Verifies the job completes successfully
+func TestFirecrackerFullSystemCrashWhileRunning(t *testing.T) {
+	kernelPath, bridgeName := getFirecrackerTestConfig(t)
+
+	if utils.PG_DSN == "" {
+		t.Skip("PG_DSN environment variable not set")
+	}
+
+	// Run migrations
+	_, err := migrations.RunMigrations(utils.PG_DSN)
+	require.NoError(t, err)
+
+	pool, err := pgxpool.New(context.Background(), utils.PG_DSN)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	// Build rootfs
+	guestIP := "172.16.0.5/24" // Different IP to avoid conflicts
+	gateway := "172.16.0.1"
+	rootfsPath := buildFirecrackerRootfs(t, guestIP, gateway)
+
+	port := portCounter.Add(2)
+	callerAddr := fmt.Sprintf("172.16.0.1:%d", port)
+	runtimeAddr := fmt.Sprintf("172.16.0.1:%d", port+1)
+
+	ctx := context.Background()
+
+	// Phase 1: Start hypervisor, spawn job, wait for checkpoint
+	t.Log("=== Phase 1: Starting hypervisor and spawning job ===")
+
+	h1 := hypervisor.New(hypervisor.Config{
+		CallerHTTPAddress:  callerAddr,
+		RuntimeHTTPAddress: runtimeAddr,
+		Pool:               pool,
+		WakePollerInterval: 500 * time.Millisecond,
+	})
+
+	fcRuntime1, err := firecracker.NewRuntime()
+	require.NoError(t, err)
+	require.NoError(t, h1.RegisterRuntime(fcRuntime1))
+
+	jd := &hypervisor.JobDefinition{
+		Name:        "fc-full-crash-running-test",
+		Version:     "1.0.0",
+		RuntimeType: runtime.RuntimeTypeFirecracker,
+		Config: &firecracker.Config{
+			KernelPath: kernelPath,
+			RootfsPath: rootfsPath,
+			VcpuCount:  1,
+			MemSizeMib: 512,
+			Network: &firecracker.NetworkConfig{
+				BridgeName:   bridgeName,
+				GuestIP:      guestIP,
+				GuestGateway: gateway,
+			},
+		},
+	}
+	require.NoError(t, h1.RegisterJobDefinition(ctx, jd))
+
+	// Spawn job with keep_running=true so VM stays running after checkpoint
+	jobID, err := h1.Spawn(ctx, hypervisor.SpawnOptions{
+		DefinitionName:    "fc-full-crash-running-test",
+		DefinitionVersion: "1.0.0",
+		Params: json.RawMessage(`{
+			"number": 4,
+			"checkpoint_keep_running": true,
+			"sleep_after_checkpoint_ms": 30000
+		}`),
+		Stdout: &testLogWriter{t: t, prefix: "[fc-stdout]"},
+		Stderr: &testLogWriter{t: t, prefix: "[fc-stderr]"},
+	})
+	require.NoError(t, err)
+	t.Logf("Spawned job: %s", jobID)
+
+	// Wait for job to checkpoint (it will still be running after checkpoint)
+	t.Log("Waiting for job to checkpoint...")
+	var checkpointed bool
+	for i := 0; i < 120; i++ {
+		job, err := h1.GetJob(ctx, jobID)
+		require.NoError(t, err)
+
+		if job.CheckpointCount > 0 {
+			checkpointed = true
+			t.Logf("Job has checkpointed (checkpoint_count=%d, state=%s)", job.CheckpointCount, job.State)
+			break
+		}
+		if job.State == hypervisor.JobStateFailed || job.State == hypervisor.JobStateCompleted {
+			t.Fatalf("Job reached terminal state before checkpointing: %s", job.State)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	require.True(t, checkpointed, "Job did not checkpoint")
+
+	// Give the job a moment to start sleeping after checkpoint
+	time.Sleep(2 * time.Second)
+
+	// Phase 2: Simulate full system crash - kill BOTH VM and hypervisor
+	t.Log("=== Phase 2: Simulating full system crash (VM + hypervisor) ===")
+
+	// Kill the Firecracker process
+	socketPattern := fmt.Sprintf("firecracker-work/%s", jobID)
+	killCmd := exec.Command("pkill", "-9", "-f", socketPattern)
+	killOutput, _ := killCmd.CombinedOutput()
+	t.Logf("Killed firecracker process: %s", string(killOutput))
+
+	// Crash the hypervisor
+	h1.DevCrash()
+	fcRuntime1.Close()
+	t.Log("Hypervisor crashed (DevCrash called)")
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Phase 3: Start NEW hypervisor and recover
+	t.Log("=== Phase 3: Starting new hypervisor and recovering ===")
+
+	h2 := hypervisor.New(hypervisor.Config{
+		CallerHTTPAddress:  callerAddr,
+		RuntimeHTTPAddress: runtimeAddr,
+		Pool:               pool,
+		WakePollerInterval: 500 * time.Millisecond,
+	})
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		h2.Shutdown(shutdownCtx)
+	}()
+
+	fcRuntime2, err := firecracker.NewRuntime()
+	require.NoError(t, err)
+	defer fcRuntime2.Close()
+
+	require.NoError(t, h2.RegisterRuntime(fcRuntime2))
+
+	t.Log("Calling RecoverState()...")
+	require.NoError(t, h2.RecoverState(ctx))
+
+	// The job was running (not suspended), so RecoverState should detect it needs to be
+	// restored from checkpoint. We may need to trigger this by updating the state.
+	// Check current state and trigger restore if needed.
+	job, err := h2.GetJob(ctx, jobID)
+	require.NoError(t, err)
+	t.Logf("Job state after recovery: %s", job.State)
+
+	// Wait for job to complete
+	t.Log("Waiting for job to complete...")
+	var completed bool
+	var finalState hypervisor.JobState
+	for i := 0; i < 180; i++ {
+		job, err := h2.GetJob(ctx, jobID)
+		require.NoError(t, err)
+
+		finalState = job.State
+		if job.State == hypervisor.JobStateCompleted || job.State == hypervisor.JobStateFailed {
+			completed = true
+			t.Logf("Job finished with state: %s", job.State)
+			if job.Result != nil && job.Result.Output != nil {
+				t.Logf("Job output: %s", string(job.Result.Output))
+			}
+			if job.Error != "" {
+				t.Logf("Job error: %s", job.Error)
+			}
+			break
+		}
+		if i%10 == 0 {
+			t.Logf("Job state: %s, waiting...", job.State)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	require.True(t, completed, "Job did not complete")
+	assert.Equal(t, hypervisor.JobStateCompleted, finalState, "Job should have completed successfully")
+
+	// Verify the result: (4 + 1) * 2 = 10
+	job, err = h2.GetJob(ctx, jobID)
+	require.NoError(t, err)
+
+	require.NotNil(t, job.Result, "Job result should not be nil")
+	assert.Equal(t, 0, job.Result.ExitCode, "Exit code should be 0")
+
+	var output struct {
+		Result struct {
+			Value int `json:"value"`
+		} `json:"result"`
+		PreCheckpointRuns int `json:"pre_checkpoint_runs"`
+	}
+	require.NoError(t, json.Unmarshal(job.Result.Output, &output))
+	assert.Equal(t, 10, output.Result.Value, "Expected (4 + 1) * 2 = 10")
+	assert.Equal(t, 1, output.PreCheckpointRuns, "Pre-checkpoint code should only run once with checkpoint restore")
+
+	t.Log("=== Firecracker full system crash while running test PASSED ===")
+
+	// Cleanup
+	_, _ = pool.Exec(ctx, "DELETE FROM jobs WHERE id = $1", jobID)
+	_, _ = pool.Exec(ctx, "DELETE FROM job_definitions WHERE name = $1", "fc-full-crash-running-test")
+}
