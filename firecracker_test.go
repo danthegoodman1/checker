@@ -86,12 +86,12 @@ func buildFirecrackerRootfs(t *testing.T, guestIP, gateway string) string {
 
 	rootfsPath := filepath.Join(t.TempDir(), "rootfs.ext4")
 
-	// Use the build-fc-rootfs.sh script
+	// Use the build-fc-rootfs.sh script (run with bash to avoid permission issues)
 	scriptPath := filepath.Join(cwd, "scripts", "build-fc-rootfs.sh")
 	dockerfilePath := filepath.Join(cwd, "demo", "Dockerfile.checkpoint_restore")
 	networkConfig := fmt.Sprintf("%s,%s", guestIP, gateway)
 
-	cmd := exec.Command(scriptPath, dockerfilePath, rootfsPath, networkConfig)
+	cmd := exec.Command("bash", scriptPath, dockerfilePath, rootfsPath, networkConfig)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("Failed to build rootfs: %v\n%s", err, output)
