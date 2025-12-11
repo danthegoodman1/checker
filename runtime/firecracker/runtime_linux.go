@@ -305,18 +305,55 @@ func NewRuntime() (*Runtime, error) {
 // Uses the unique portion of the execution ID (snowflake ID part) while staying under
 // the 15-character limit for network interface names (IFNAMSIZ=16 including null).
 // For execution IDs like "job-1765430333173062443-1", we skip "job-" and take
-// up to 11 characters from the unique snowflake portion.
+// up to 11 characters from the END of the unique snowflake portion.
 func generateTAPName(executionID string) string {
 	// Skip common prefixes to get to the unique part
 	name := executionID
 	if len(name) > 4 && name[:4] == "job-" {
 		name = name[4:] // Skip "job-" prefix
 	}
-	// Take up to 11 characters to stay under the 15-char limit with "tap-" prefix
+	// Take up to 11 characters from the END to stay under the 15-char limit with "tap-" prefix.
+	// Snowflake IDs have more variance in trailing characters (sequence/random bits).
 	if len(name) > 11 {
-		name = name[:11]
+		name = name[len(name)-11:]
 	}
 	return fmt.Sprintf("tap-%s", name)
+}
+
+// tapDeviceExists checks if a TAP device with the given name already exists.
+func tapDeviceExists(tapName string) bool {
+	_, err := net.InterfaceByName(tapName)
+	return err == nil
+}
+
+// findUniqueTAPName generates a TAP name and appends a numeric suffix if needed.
+// Returns the unique name or error if all attempts exhausted.
+func findUniqueTAPName(executionID string) (string, error) {
+	baseName := generateTAPName(executionID)
+
+	// Try without suffix first
+	if !tapDeviceExists(baseName) {
+		return baseName, nil
+	}
+
+	// Try with numeric suffixes (shorten base to fit suffix within 15 char limit)
+	// "tap-" (4) + base (8) + suffix (up to 3, e.g., "-99") = 15
+	shortBase := baseName
+	if len(shortBase) > 12 {
+		shortBase = shortBase[:12] // Leave room for suffix
+	}
+
+	for i := 1; i <= 99; i++ {
+		candidate := fmt.Sprintf("%s-%d", shortBase, i)
+		if len(candidate) > 15 {
+			candidate = candidate[:15]
+		}
+		if !tapDeviceExists(candidate) {
+			return candidate, nil
+		}
+	}
+
+	return "", fmt.Errorf("could not find unique TAP name for %s after 99 attempts", executionID)
 }
 
 // createTAPDevice creates a TAP device and attaches it to the specified bridge.
@@ -512,7 +549,10 @@ func (r *Runtime) startVM(ctx context.Context, executionID string, cfg *Config, 
 		return nil, fmt.Errorf("network config is required")
 	}
 
-	tapDeviceName := generateTAPName(executionID)
+	tapDeviceName, err := findUniqueTAPName(executionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate TAP name: %w", err)
+	}
 	logger.Debug().
 		Str("tap", tapDeviceName).
 		Str("bridge", cfg.Network.BridgeName).
@@ -678,7 +718,11 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 
 	tapDeviceName := c.tapDeviceName
 	if tapDeviceName == "" {
-		tapDeviceName = generateTAPName(c.executionID)
+		var err error
+		tapDeviceName, err = findUniqueTAPName(c.executionID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate TAP name: %w", err)
+		}
 	}
 	logger.Debug().
 		Str("tap", tapDeviceName).
@@ -765,7 +809,10 @@ func (r *Runtime) ReconstructCheckpoint(checkpointPath string, executionID strin
 	dir := filepath.Dir(checkpointPath)
 	memFilePath := filepath.Join(dir, fmt.Sprintf("mem-%s", executionID))
 
-	tapDeviceName := generateTAPName(executionID)
+	tapDeviceName, err := findUniqueTAPName(executionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate TAP name: %w", err)
+	}
 	guestMAC, err := GenerateMAC()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate MAC address: %w", err)
