@@ -676,7 +676,7 @@ func (h *Hypervisor) setupRetryCallback(runner *JobRunner, jd *JobDefinition) {
 	})
 }
 
-// maybeEvictJob evicts a job from memory if it's in a terminal state or sleeping for more than 10 seconds.
+// maybeEvictJob evicts a job from memory if it's in a terminal state, pending retry, or sleeping for more than 10 seconds.
 // This is safe because the DB is the source of truth - jobs can be reloaded when needed.
 func (h *Hypervisor) maybeEvictJob(jobID string, job *Job) {
 	if job.IsTerminal() {
@@ -685,6 +685,18 @@ func (h *Hypervisor) maybeEvictJob(jobID string, job *Job) {
 		delete(h.runners, jobID)
 		h.runnersMu.Unlock()
 		logger.Debug().Str("job_id", jobID).Str("state", string(job.State)).Msg("evicted terminal job from memory")
+		return
+	}
+
+	if job.State == JobStatePendingRetry {
+		// Evict pending_retry jobs so the resume poller can pick them up
+		h.runnersMu.Lock()
+		delete(h.runners, jobID)
+		h.runnersMu.Unlock()
+		logger.Debug().
+			Str("job_id", jobID).
+			Str("state", string(job.State)).
+			Msg("evicted pending_retry job from memory")
 		return
 	}
 
