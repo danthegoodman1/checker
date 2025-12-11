@@ -91,6 +91,9 @@ type JobRunner struct {
 	// Track pending checkpoint requests for collapsing
 	pendingCheckpointRequests []chan<- commandResult
 
+	// Track when a retry is pending (failure callback is executing)
+	retryPending bool
+
 	// Context for cancellation
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -138,7 +141,8 @@ func (r *JobRunner) commandLoop() {
 			r.handleCommand(cmd)
 
 			// Check if we're in a terminal state after handling
-			if r.job.IsTerminal() {
+			// Don't exit if a retry is pending (failure callback is executing)
+			if r.job.IsTerminal() && !r.retryPending {
 				r.notifyWaiters()
 				r.drainRemainingCommands()
 				return
@@ -309,6 +313,7 @@ func (r *JobRunner) handleProcessExited(cmd command) {
 	// NOTE: Must be async to avoid deadlock - onFailure may call GetState/Retry
 	// which send commands back to this command loop
 	if failed && r.onFailure != nil {
+		r.retryPending = true
 		go r.onFailure(r, cmd.exitCode)
 		return
 	}
@@ -673,6 +678,9 @@ func (r *JobRunner) handleWaitForResult(cmd command) {
 
 // handleRetry handles a retry request
 func (r *JobRunner) handleRetry(cmd command) {
+	// Clear retry pending flag - we're handling the retry now
+	r.retryPending = false
+
 	// Can only retry from Failed state
 	if r.job.State != JobStateFailed {
 		if cmd.resultChan != nil {
