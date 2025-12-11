@@ -400,7 +400,7 @@ func copyFile(src, dst string) error {
 
 // injectEnvVars writes environment variables to /etc/checker.env in the ext4 rootfs.
 // The init script sources this file to set up the runtime environment.
-func injectEnvVars(rootfsPath string, env map[string]string, logger zerolog.Logger) error {
+func injectEnvVars(rootfsPath string, env map[string]string) error {
 	// Create a temporary mount point
 	mountPoint, err := os.MkdirTemp("", "fc-rootfs-mount-")
 	if err != nil {
@@ -413,19 +413,15 @@ func injectEnvVars(rootfsPath string, env map[string]string, logger zerolog.Logg
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to mount rootfs: %w, output: %s", err, string(output))
 	}
-	logger.Debug().Str("mount_point", mountPoint).Msg("mounted rootfs for env injection")
 
 	defer func() {
 		// Unmount when done
-		if output, err := exec.Command("umount", mountPoint).CombinedOutput(); err != nil {
-			logger.Warn().Err(err).Str("output", string(output)).Msg("failed to unmount rootfs")
-		}
+		exec.Command("umount", mountPoint).Run()
 	}()
 
 	// Verify /etc exists
 	etcPath := filepath.Join(mountPoint, "etc")
 	if _, err := os.Stat(etcPath); os.IsNotExist(err) {
-		logger.Warn().Msg("/etc does not exist in rootfs, creating it")
 		if err := os.MkdirAll(etcPath, 0755); err != nil {
 			return fmt.Errorf("failed to create /etc: %w", err)
 		}
@@ -446,20 +442,8 @@ func injectEnvVars(rootfsPath string, env map[string]string, logger zerolog.Logg
 		return fmt.Errorf("failed to write environment file: %w", err)
 	}
 
-	logger.Debug().
-		Str("env_file", envFilePath).
-		Int("content_len", envContent.Len()).
-		Msg("wrote environment file")
-
 	// Sync to ensure writes are flushed before unmount
 	exec.Command("sync").Run()
-
-	// Verify the file was written
-	if content, err := os.ReadFile(envFilePath); err != nil {
-		logger.Warn().Err(err).Msg("failed to verify environment file")
-	} else {
-		logger.Debug().Str("content", string(content)).Msg("environment file content")
-	}
 
 	return nil
 }
@@ -503,7 +487,6 @@ func (r *Runtime) Start(ctx context.Context, opts runtime.StartOptions) (runtime
 		Str("execution_id", opts.ExecutionID).
 		Str("kernel", cfg.KernelPath).
 		Str("rootfs", cfg.RootfsPath).
-		Str("boot_args", cfg.BootArgs).
 		Msg("starting Firecracker VM")
 
 	// Create work directory for this VM
@@ -529,14 +512,9 @@ func (r *Runtime) Start(ctx context.Context, opts runtime.StartOptions) (runtime
 	env["CHECKER_JOB_ID"] = opts.ExecutionID
 
 	// Inject environment variables into the rootfs
-	if err := injectEnvVars(workRootfs, env, r.logger); err != nil {
+	if err := injectEnvVars(workRootfs, env); err != nil {
 		return nil, fmt.Errorf("failed to inject environment variables: %w", err)
 	}
-
-	r.logger.Debug().
-		Str("work_rootfs", workRootfs).
-		Int("env_count", len(env)).
-		Msg("injected environment variables into rootfs")
 
 	// Create a modified config with the working rootfs
 	workCfg := *cfg
@@ -604,8 +582,7 @@ func (r *Runtime) startVM(ctx context.Context, executionID string, cfg *Config, 
 	logger.Debug().Str("mac", guestMAC).Msg("using guest MAC address")
 
 	// Start Firecracker process
-	// Use Info level to see more output for debugging
-	fcCmd := exec.CommandContext(ctx, "firecracker", "--api-sock", socketPath, "--level", "Info")
+	fcCmd := exec.CommandContext(ctx, "firecracker", "--api-sock", socketPath, "--level", "Error")
 	if stdout != nil {
 		fcCmd.Stdout = stdout
 	}
