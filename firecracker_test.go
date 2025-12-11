@@ -514,7 +514,7 @@ func TestFirecrackerProcessCrashRestoreFromCheckpoint(t *testing.T) {
 		Params: json.RawMessage(`{
 			"number": 5,
 			"checkpoint_keep_running": true,
-			"sleep_after_checkpoint_ms": 30000
+			"sleep_after_checkpoint_ms": 5000
 		}`),
 		Stdout: &testLogWriter{t: t, prefix: "[fc-stdout]"},
 		Stderr: &testLogWriter{t: t, prefix: "[fc-stderr]"},
