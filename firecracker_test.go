@@ -254,8 +254,8 @@ func TestFirecrackerHypervisorIntegration(t *testing.T) {
 	_, _ = pool.Exec(ctx, "DELETE FROM job_definitions WHERE name = $1", "fc-integration-test")
 }
 
-// TestFirecrackerCrashRecovery tests that Firecracker jobs can be recovered after hypervisor crash.
-func TestFirecrackerCrashRecovery(t *testing.T) {
+// TestFirecrackerHypervisorCrashRecovery tests that Firecracker jobs can be recovered after hypervisor crash.
+func TestFirecrackerHypervisorCrashRecovery(t *testing.T) {
 	kernelPath, bridgeName := getFirecrackerTestConfig(t)
 
 	if utils.PG_DSN == "" {
