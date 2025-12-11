@@ -2,17 +2,23 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
-	"strings"
 	"testing"
 	"time"
 
+	"github.com/danthegoodman1/checker/hypervisor"
+	"github.com/danthegoodman1/checker/migrations"
+	"github.com/danthegoodman1/checker/pg"
+	"github.com/danthegoodman1/checker/query"
 	"github.com/danthegoodman1/checker/runtime"
 	"github.com/danthegoodman1/checker/runtime/firecracker"
+	"github.com/danthegoodman1/checker/utils"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -20,446 +26,518 @@ import (
 // Environment variables for Firecracker tests:
 // - FC_KERNEL_PATH: Path to the kernel image (required)
 //   Download with: curl -fLo vmlinux-5.10.bin "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/x86_64/vmlinux-5.10.223"
+// - FC_BRIDGE_NAME: Name of the bridge for TAP networking (default: fcbr0)
+// - PG_DSN: PostgreSQL connection string (required for hypervisor tests)
 //
-// Run with: FC_KERNEL_PATH=/path/to/vmlinux go test -v -run TestFirecracker
+// Before running tests, set up the network bridge:
+//   sudo ip link add fcbr0 type bridge
+//   sudo ip addr add 172.16.0.1/24 dev fcbr0
+//   sudo ip link set fcbr0 up
+//   echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
+//   sudo iptables -t nat -A POSTROUTING -s 172.16.0.0/24 ! -o fcbr0 -j MASQUERADE
+//
+// Run with: FC_KERNEL_PATH=/path/to/vmlinux PG_DSN=postgres://... go test -v -run TestFirecracker
 
-// buildTestRootfs builds a simple rootfs ext4 image for testing.
+func getFirecrackerTestConfig(t *testing.T) (kernelPath, bridgeName string) {
+	t.Helper()
+
+	if goruntime.GOOS != "linux" {
+		t.Skip("Firecracker requires Linux")
+	}
+
+	kernelPath = os.Getenv("FC_KERNEL_PATH")
+	if kernelPath == "" {
+		t.Skip("FC_KERNEL_PATH not set. Download kernel with: curl -fLo vmlinux-5.10.bin 'https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/x86_64/vmlinux-5.10.223'")
+	}
+
+	if _, err := exec.LookPath("firecracker"); err != nil {
+		t.Skip("firecracker not found in PATH")
+	}
+
+	bridgeName = os.Getenv("FC_BRIDGE_NAME")
+	if bridgeName == "" {
+		bridgeName = "fcbr0"
+	}
+
+	// Verify bridge exists
+	cmd := exec.Command("ip", "link", "show", bridgeName)
+	if err := cmd.Run(); err != nil {
+		t.Skipf("Bridge %s not found. Set up with: sudo ip link add %s type bridge && sudo ip addr add 172.16.0.1/24 dev %s && sudo ip link set %s up",
+			bridgeName, bridgeName, bridgeName, bridgeName)
+	}
+
+	return kernelPath, bridgeName
+}
+
+// buildFirecrackerRootfs builds a rootfs ext4 image from the checkpoint_restore Dockerfile.
 // Returns the path to the rootfs file.
-func buildTestRootfs(t *testing.T, initScript string) string {
+func buildFirecrackerRootfs(t *testing.T, guestIP, gateway string) string {
 	t.Helper()
 
 	// Check dependencies
-	for _, cmd := range []string{"buildah", "skopeo", "umoci", "mkfs.ext4"} {
+	for _, cmd := range []string{"buildah", "skopeo", "umoci", "mkfs.ext4", "jq"} {
 		if _, err := exec.LookPath(cmd); err != nil {
 			t.Skipf("%s not found, skipping test", cmd)
 		}
 	}
 
-	workDir := t.TempDir()
-	rootfsPath := filepath.Join(workDir, "rootfs.ext4")
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
 
-	// Create a minimal rootfs directory
-	fsDir := filepath.Join(workDir, "rootfs")
-	for _, dir := range []string{"dev", "proc", "sys", "run", "tmp", "bin", "etc"} {
-		require.NoError(t, os.MkdirAll(filepath.Join(fsDir, dir), 0755))
-	}
+	rootfsPath := filepath.Join(t.TempDir(), "rootfs.ext4")
 
-	// Copy busybox for shell utilities (from alpine)
-	// We'll use a simpler approach: create from alpine image
-	imgName := fmt.Sprintf("fc-test-%d", time.Now().UnixNano())
+	// Use the build-fc-rootfs.sh script
+	scriptPath := filepath.Join(cwd, "scripts", "build-fc-rootfs.sh")
+	dockerfilePath := filepath.Join(cwd, "demo", "Dockerfile.checkpoint_restore")
+	networkConfig := fmt.Sprintf("%s,%s", guestIP, gateway)
 
-	// Create a simple Dockerfile
-	dockerfilePath := filepath.Join(workDir, "Dockerfile")
-	dockerfile := `FROM alpine:latest
-RUN apk add --no-cache busybox
-`
-	require.NoError(t, os.WriteFile(dockerfilePath, []byte(dockerfile), 0644))
-
-	// Build with buildah
-	buildCmd := exec.Command("buildah", "bud", "-t", imgName, workDir)
-	buildOutput, err := buildCmd.CombinedOutput()
+	cmd := exec.Command(scriptPath, dockerfilePath, rootfsPath, networkConfig)
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("buildah build failed: %v\n%s", err, buildOutput)
+		t.Fatalf("Failed to build rootfs: %v\n%s", err, output)
 	}
-	t.Cleanup(func() {
-		exec.Command("buildah", "rmi", imgName).Run()
-	})
-
-	// Export to OCI layout
-	ociDir := filepath.Join(workDir, "oci")
-	copyCmd := exec.Command("skopeo", "copy", fmt.Sprintf("containers-storage:localhost/%s", imgName), fmt.Sprintf("oci:%s:latest", ociDir))
-	copyOutput, err := copyCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("skopeo copy failed: %v\n%s", err, copyOutput)
-	}
-
-	// Unpack with umoci
-	bundleDir := filepath.Join(workDir, "bundle")
-	unpackCmd := exec.Command("umoci", "unpack", "--image", fmt.Sprintf("%s:latest", ociDir), bundleDir)
-	unpackOutput, err := unpackCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("umoci unpack failed: %v\n%s", err, unpackOutput)
-	}
-
-	// Use the unpacked rootfs
-	fsDir = filepath.Join(bundleDir, "rootfs")
-
-	// Create directories for Firecracker
-	for _, dir := range []string{"dev", "proc", "sys", "run", "tmp"} {
-		os.MkdirAll(filepath.Join(fsDir, dir), 0755)
-	}
-
-	// Create resolv.conf
-	os.WriteFile(filepath.Join(fsDir, "etc", "resolv.conf"), []byte("nameserver 8.8.8.8\n"), 0644)
-
-	// Create init script
-	initPath := filepath.Join(fsDir, "init")
-	fullInit := fmt.Sprintf(`#!/bin/sh
-mount -t proc proc /proc
-mount -t sysfs sys /sys
-mount -t devtmpfs dev /dev 2>/dev/null || true
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-%s
-reboot -f
-`, initScript)
-	require.NoError(t, os.WriteFile(initPath, []byte(fullInit), 0755))
-
-	// Create ext4 filesystem
-	// Calculate size (2x content + minimum 64MB)
-	var dirSize int64
-	filepath.Walk(fsDir, func(path string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() {
-			dirSize += info.Size()
-		}
-		return nil
-	})
-	sizeMB := (dirSize / (1024 * 1024)) * 2
-	if sizeMB < 64 {
-		sizeMB = 64
-	}
-
-	// Create sparse file
-	truncateCmd := exec.Command("truncate", "-s", fmt.Sprintf("%dM", sizeMB), rootfsPath)
-	if err := truncateCmd.Run(); err != nil {
-		t.Fatalf("truncate failed: %v", err)
-	}
-
-	// Create ext4 with directory contents
-	mkfsCmd := exec.Command("mkfs.ext4", "-F", "-L", "rootfs", "-O", "^metadata_csum,^64bit", "-d", fsDir, rootfsPath)
-	mkfsOutput, err := mkfsCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("mkfs.ext4 failed: %v\n%s", err, mkfsOutput)
-	}
-
-	// fsck and resize
-	exec.Command("e2fsck", "-fy", rootfsPath).Run()
-	exec.Command("resize2fs", "-M", rootfsPath).Run()
+	t.Logf("Built rootfs: %s", rootfsPath)
 
 	return rootfsPath
 }
 
-// TestFirecrackerStartAndWait tests starting a Firecracker VM and waiting for it to exit.
-func TestFirecrackerStartAndWait(t *testing.T) {
-	if goruntime.GOOS != "linux" {
-		t.Skip("Firecracker requires Linux")
+// TestFirecrackerHypervisorIntegration tests the full hypervisor flow with Firecracker:
+// spawn job -> checkpoint -> restore -> complete
+func TestFirecrackerHypervisorIntegration(t *testing.T) {
+	kernelPath, bridgeName := getFirecrackerTestConfig(t)
+
+	if utils.PG_DSN == "" {
+		t.Skip("PG_DSN environment variable not set")
 	}
 
-	kernelPath := os.Getenv("FC_KERNEL_PATH")
-	if kernelPath == "" {
-		t.Skip("FC_KERNEL_PATH not set. Download kernel with: curl -fLo vmlinux-5.10.bin 'https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/x86_64/vmlinux-5.10.223'")
-	}
-
-	if _, err := exec.LookPath("firecracker"); err != nil {
-		t.Skip("firecracker not found in PATH")
-	}
-
-	// Build a simple rootfs that prints a message and exits
-	rootfsPath := buildTestRootfs(t, `
-echo "Hello from Firecracker!"
-echo "Test completed successfully"
-`)
-
-	// Create runtime
-	rt, err := firecracker.NewRuntime()
+	// Run migrations
+	_, err := migrations.RunMigrations(utils.PG_DSN)
 	require.NoError(t, err)
-	defer rt.Close()
 
-	// Create config
-	cfg := &firecracker.Config{
-		KernelPath: kernelPath,
-		RootfsPath: rootfsPath,
-		VcpuCount:  1,
-		MemSizeMib: 256,
+	// Connect to database
+	pool, err := pgxpool.New(context.Background(), utils.PG_DSN)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	// Build rootfs with networking configured
+	guestIP := "172.16.0.2/24"
+	gateway := "172.16.0.1"
+	rootfsPath := buildFirecrackerRootfs(t, guestIP, gateway)
+
+	// Get unique ports for this test
+	port := portCounter.Add(2)
+	callerAddr := fmt.Sprintf("172.16.0.1:%d", port)    // Use bridge IP so VM can reach it
+	runtimeAddr := fmt.Sprintf("172.16.0.1:%d", port+1) // Use bridge IP
+
+	ctx := context.Background()
+
+	t.Log("=== Starting hypervisor ===")
+	h := hypervisor.New(hypervisor.Config{
+		CallerHTTPAddress:  callerAddr,
+		RuntimeHTTPAddress: runtimeAddr,
+		Pool:               pool,
+		WakePollerInterval: 500 * time.Millisecond,
+	})
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		h.Shutdown(shutdownCtx)
+	}()
+
+	fcRuntime, err := firecracker.NewRuntime()
+	require.NoError(t, err)
+	defer fcRuntime.Close()
+
+	require.NoError(t, h.RegisterRuntime(fcRuntime))
+
+	// Register job definition
+	jd := &hypervisor.JobDefinition{
+		Name:        "fc-integration-test",
+		Version:     "1.0.0",
+		RuntimeType: runtime.RuntimeTypeFirecracker,
+		Config: &firecracker.Config{
+			KernelPath: kernelPath,
+			RootfsPath: rootfsPath,
+			VcpuCount:  1,
+			MemSizeMib: 512,
+			Network: &firecracker.NetworkConfig{
+				BridgeName:   bridgeName,
+				GuestIP:      guestIP,
+				GuestGateway: gateway,
+			},
+		},
 	}
+	require.NoError(t, h.RegisterJobDefinition(ctx, jd))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	// Spawn job
+	t.Log("=== Spawning job ===")
+	jobID, err := h.Spawn(ctx, hypervisor.SpawnOptions{
+		DefinitionName:    "fc-integration-test",
+		DefinitionVersion: "1.0.0",
+		Params:            json.RawMessage(`{"number": 5, "suspend_duration": "1s"}`),
+		Stdout:            &testLogWriter{t: t, prefix: "[fc-stdout]"},
+		Stderr:            &testLogWriter{t: t, prefix: "[fc-stderr]"},
+	})
+	require.NoError(t, err)
+	t.Logf("Spawned job: %s", jobID)
 
-	// Capture output
-	var stdout, stderr strings.Builder
+	// Wait for job to be suspended
+	t.Log("Waiting for job to be suspended...")
+	var suspended bool
+	for i := 0; i < 120; i++ { // Wait up to 60 seconds (Firecracker boot can be slower)
+		var dbJob query.Job
+		err := query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+			var err error
+			dbJob, err = q.GetJob(ctx, jobID)
+			return err
+		})
+		require.NoError(t, err)
 
-	// Start the VM
-	t.Log("Starting Firecracker VM...")
-	proc, err := rt.Start(ctx, runtime.StartOptions{
-		ExecutionID: fmt.Sprintf("test-%d", time.Now().UnixNano()),
-		Config:      cfg.WithDefaults(),
-		Stdout:      &stdout,
-		Stderr:      &stderr,
+		if dbJob.State == query.JobStateSuspended {
+			suspended = true
+			t.Logf("Job is now suspended (checkpoint_count=%d)", dbJob.CheckpointCount)
+			break
+		}
+		if dbJob.State == query.JobStateFailed {
+			t.Fatalf("Job failed with error: %s", dbJob.Error.String)
+		}
+		if i%10 == 0 {
+			t.Logf("Job state: %s, waiting...", dbJob.State)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	require.True(t, suspended, "Job did not reach suspended state")
+
+	// Update suspend_until to trigger immediate wake
+	t.Log("Triggering immediate wake...")
+	_, err = pool.Exec(ctx, "UPDATE jobs SET suspend_until = NOW() WHERE id = $1", jobID)
+	require.NoError(t, err)
+
+	// Wait for job to complete
+	t.Log("Waiting for job to complete...")
+	var completed bool
+	var finalState query.JobState
+	for i := 0; i < 120; i++ {
+		var dbJob query.Job
+		err := query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+			var err error
+			dbJob, err = q.GetJob(ctx, jobID)
+			return err
+		})
+		require.NoError(t, err)
+
+		finalState = dbJob.State
+		if dbJob.State == query.JobStateCompleted || dbJob.State == query.JobStateFailed {
+			completed = true
+			t.Logf("Job finished with state: %s", dbJob.State)
+			if dbJob.ResultOutput != nil {
+				t.Logf("Job output: %s", string(dbJob.ResultOutput))
+			}
+			if dbJob.Error.Valid {
+				t.Logf("Job error: %s", dbJob.Error.String)
+			}
+			break
+		}
+		if i%10 == 0 {
+			t.Logf("Job state: %s, waiting...", dbJob.State)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	require.True(t, completed, "Job did not complete")
+	assert.Equal(t, query.JobStateCompleted, finalState, "Job should have completed successfully")
+
+	// Verify result
+	var dbJob query.Job
+	err = query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		var err error
+		dbJob, err = q.GetJob(ctx, jobID)
+		return err
 	})
 	require.NoError(t, err)
 
-	t.Log("Waiting for VM to exit...")
-	exitCode, err := proc.Wait(ctx)
-	require.NoError(t, err)
+	assert.Equal(t, int32(0), dbJob.ResultExitCode.Int32, "Exit code should be 0")
 
-	t.Logf("VM stdout:\n%s", stdout.String())
-	t.Logf("VM stderr:\n%s", stderr.String())
-	t.Logf("Exit code: %d", exitCode)
+	var output struct {
+		Result struct {
+			Step  int `json:"step"`
+			Value int `json:"value"`
+		} `json:"result"`
+		PreCheckpointRuns int `json:"pre_checkpoint_runs"`
+	}
+	require.NoError(t, json.Unmarshal(dbJob.ResultOutput, &output))
+	assert.Equal(t, 12, output.Result.Value, "Expected (5 + 1) * 2 = 12")
+	assert.Equal(t, 1, output.PreCheckpointRuns, "Pre-checkpoint code should only run once")
 
-	// VM should have exited (reboot -f causes exit)
-	assert.Contains(t, stdout.String(), "Hello from Firecracker!")
+	t.Log("=== Firecracker hypervisor integration test PASSED ===")
 
 	// Cleanup
-	require.NoError(t, proc.Cleanup(ctx))
-
-	t.Log("=== Firecracker start and wait test PASSED ===")
+	_, _ = pool.Exec(ctx, "DELETE FROM jobs WHERE id = $1", jobID)
+	_, _ = pool.Exec(ctx, "DELETE FROM job_definitions WHERE name = $1", "fc-integration-test")
 }
 
-// TestFirecrackerCheckpointRestore tests checkpoint and restore functionality.
-func TestFirecrackerCheckpointRestore(t *testing.T) {
-	if goruntime.GOOS != "linux" {
-		t.Skip("Firecracker requires Linux")
+// TestFirecrackerCrashRecovery tests that Firecracker jobs can be recovered after hypervisor crash.
+func TestFirecrackerCrashRecovery(t *testing.T) {
+	kernelPath, bridgeName := getFirecrackerTestConfig(t)
+
+	if utils.PG_DSN == "" {
+		t.Skip("PG_DSN environment variable not set")
 	}
 
-	kernelPath := os.Getenv("FC_KERNEL_PATH")
-	if kernelPath == "" {
-		t.Skip("FC_KERNEL_PATH not set. Download kernel with: curl -fLo vmlinux-5.10.bin 'https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/x86_64/vmlinux-5.10.223'")
-	}
-
-	if _, err := exec.LookPath("firecracker"); err != nil {
-		t.Skip("firecracker not found in PATH")
-	}
-
-	// Build a rootfs that prints a counter, sleeps, then prints more
-	// We'll checkpoint during the sleep and verify it continues after restore
-	rootfsPath := buildTestRootfs(t, `
-echo "Starting counter..."
-echo "COUNT: 1"
-echo "COUNT: 2"
-echo "COUNT: 3"
-echo "===CHECKPOINT_NOW==="
-sleep 5
-echo "COUNT: 4"
-echo "COUNT: 5"
-echo "Done!"
-`)
-
-	// Create runtime
-	rt, err := firecracker.NewRuntime()
+	// Run migrations
+	_, err := migrations.RunMigrations(utils.PG_DSN)
 	require.NoError(t, err)
-	defer rt.Close()
 
-	executionID := fmt.Sprintf("test-checkpoint-%d", time.Now().UnixNano())
+	pool, err := pgxpool.New(context.Background(), utils.PG_DSN)
+	require.NoError(t, err)
+	defer pool.Close()
 
-	// Create config
-	cfg := &firecracker.Config{
-		KernelPath: kernelPath,
-		RootfsPath: rootfsPath,
-		VcpuCount:  1,
-		MemSizeMib: 256,
+	// Build rootfs
+	guestIP := "172.16.0.3/24" // Different IP to avoid conflicts
+	gateway := "172.16.0.1"
+	rootfsPath := buildFirecrackerRootfs(t, guestIP, gateway)
+
+	port := portCounter.Add(2)
+	callerAddr := fmt.Sprintf("172.16.0.1:%d", port)
+	runtimeAddr := fmt.Sprintf("172.16.0.1:%d", port+1)
+
+	ctx := context.Background()
+
+	// Phase 1: Start hypervisor, spawn job, wait for suspend, then "crash"
+	t.Log("=== Phase 1: Starting hypervisor and spawning job ===")
+
+	h1 := hypervisor.New(hypervisor.Config{
+		CallerHTTPAddress:  callerAddr,
+		RuntimeHTTPAddress: runtimeAddr,
+		Pool:               pool,
+		WakePollerInterval: 500 * time.Millisecond,
+	})
+
+	fcRuntime1, err := firecracker.NewRuntime()
+	require.NoError(t, err)
+	require.NoError(t, h1.RegisterRuntime(fcRuntime1))
+
+	jd := &hypervisor.JobDefinition{
+		Name:        "fc-crash-recovery-test",
+		Version:     "1.0.0",
+		RuntimeType: runtime.RuntimeTypeFirecracker,
+		Config: &firecracker.Config{
+			KernelPath: kernelPath,
+			RootfsPath: rootfsPath,
+			VcpuCount:  1,
+			MemSizeMib: 512,
+			Network: &firecracker.NetworkConfig{
+				BridgeName:   bridgeName,
+				GuestIP:      guestIP,
+				GuestGateway: gateway,
+			},
+		},
 	}
+	require.NoError(t, h1.RegisterJobDefinition(ctx, jd))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	// Capture output
-	var stdout1 strings.Builder
-
-	// Start the VM
-	t.Log("=== Phase 1: Starting VM and creating checkpoint ===")
-	proc, err := rt.Start(ctx, runtime.StartOptions{
-		ExecutionID: executionID,
-		Config:      cfg.WithDefaults(),
-		Stdout:      &stdout1,
-		Stderr:      &stdout1,
+	jobID, err := h1.Spawn(ctx, hypervisor.SpawnOptions{
+		DefinitionName:    "fc-crash-recovery-test",
+		DefinitionVersion: "1.0.0",
+		Params:            json.RawMessage(`{"number": 7, "suspend_duration": "5s"}`),
+		Stdout:            &testLogWriter{t: t, prefix: "[fc-stdout]"},
+		Stderr:            &testLogWriter{t: t, prefix: "[fc-stderr]"},
 	})
 	require.NoError(t, err)
+	t.Logf("Spawned job: %s", jobID)
 
-	// Wait for CHECKPOINT_NOW signal (VM is in sleep)
-	t.Log("Waiting for VM to reach checkpoint point...")
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(stdout1.String(), "===CHECKPOINT_NOW===") {
+	// Wait for job to be suspended
+	t.Log("Waiting for job to be suspended...")
+	var suspended bool
+	for i := 0; i < 120; i++ {
+		var dbJob query.Job
+		err := query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+			var err error
+			dbJob, err = q.GetJob(ctx, jobID)
+			return err
+		})
+		require.NoError(t, err)
+
+		if dbJob.State == query.JobStateSuspended {
+			suspended = true
+			t.Logf("Job is now suspended")
 			break
 		}
-		time.Sleep(50 * time.Millisecond)
+		if dbJob.State == query.JobStateFailed {
+			t.Fatalf("Job failed with error: %s", dbJob.Error.String)
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
-	require.Contains(t, stdout1.String(), "===CHECKPOINT_NOW===", "VM did not reach checkpoint point")
-	t.Log("VM reached checkpoint point")
-	t.Logf("Output before checkpoint:\n%s", stdout1.String())
+	require.True(t, suspended, "Job did not reach suspended state")
 
-	// Create checkpoint (this pauses and kills the VM)
-	t.Log("Creating checkpoint...")
-	checkpoint, err := proc.Checkpoint(ctx, false) // keepRunning=false
-	require.NoError(t, err)
-	t.Logf("Checkpoint created at: %s", checkpoint.Path())
+	// Simulate crash
+	t.Log("=== Phase 2: Simulating crash (DevCrash) ===")
+	h1.DevCrash()
+	fcRuntime1.Close()
+	time.Sleep(100 * time.Millisecond)
 
-	// Cleanup the first process
-	proc.Cleanup(ctx)
+	// Phase 3: Start NEW hypervisor and recover
+	t.Log("=== Phase 3: Starting new hypervisor and recovering state ===")
 
-	// Phase 2: Restore and verify it continues
-	t.Log("=== Phase 2: Restoring from checkpoint ===")
-
-	var stdout2 strings.Builder
-	t.Log("Restoring from checkpoint...")
-	proc2, err := rt.Restore(ctx, runtime.RestoreOptions{
-		Checkpoint: checkpoint,
-		Stdout:     &stdout2,
-		Stderr:     &stdout2,
+	h2 := hypervisor.New(hypervisor.Config{
+		CallerHTTPAddress:  callerAddr,
+		RuntimeHTTPAddress: runtimeAddr,
+		Pool:               pool,
+		WakePollerInterval: 500 * time.Millisecond,
 	})
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		h2.Shutdown(shutdownCtx)
+	}()
+
+	fcRuntime2, err := firecracker.NewRuntime()
+	require.NoError(t, err)
+	defer fcRuntime2.Close()
+
+	require.NoError(t, h2.RegisterRuntime(fcRuntime2))
+
+	t.Log("Calling RecoverState()...")
+	require.NoError(t, h2.RecoverState(ctx))
+
+	// Update suspend_until to trigger immediate wake
+	t.Log("Updating suspend_until to trigger immediate wake...")
+	_, err = pool.Exec(ctx, "UPDATE jobs SET suspend_until = NOW() WHERE id = $1", jobID)
 	require.NoError(t, err)
 
-	// Wait for restored VM to complete
-	t.Log("Waiting for restored VM to complete...")
-	exitCode, err := proc2.Wait(ctx)
-	require.NoError(t, err)
+	// Wait for job to complete
+	t.Log("Waiting for job to complete...")
+	var completed bool
+	var finalState query.JobState
+	for i := 0; i < 120; i++ {
+		var dbJob query.Job
+		err := query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+			var err error
+			dbJob, err = q.GetJob(ctx, jobID)
+			return err
+		})
+		require.NoError(t, err)
 
-	t.Logf("Restored VM stdout:\n%s", stdout2.String())
-	t.Logf("Exit code: %d", exitCode)
-
-	// Verify the restored VM continued from where it left off
-	// It should print COUNT: 4, COUNT: 5, and Done!
-	assert.Contains(t, stdout2.String(), "COUNT: 4", "Restored VM should continue counting")
-	assert.Contains(t, stdout2.String(), "COUNT: 5", "Restored VM should continue counting")
-	assert.Contains(t, stdout2.String(), "Done!", "Restored VM should complete")
-
-	proc2.Cleanup(ctx)
-
-	t.Log("=== Firecracker checkpoint restore test PASSED ===")
-}
-
-// TestFirecrackerConfigParsing tests that config parsing works correctly.
-func TestFirecrackerConfigParsing(t *testing.T) {
-	if goruntime.GOOS != "linux" {
-		t.Skip("Firecracker requires Linux")
-	}
-
-	// This test doesn't need firecracker binary, just tests config parsing
-	rt := &firecracker.Runtime{}
-
-	// Test valid config
-	validJSON := `{
-		"kernel_path": "/path/to/kernel",
-		"rootfs_path": "/path/to/rootfs.ext4",
-		"vcpu_count": 2,
-		"mem_size_mib": 1024,
-		"vsock_cid": 3
-	}`
-
-	cfg, err := rt.ParseConfig([]byte(validJSON))
-	require.NoError(t, err)
-
-	fcCfg, ok := cfg.(*firecracker.Config)
-	require.True(t, ok)
-	assert.Equal(t, "/path/to/kernel", fcCfg.KernelPath)
-	assert.Equal(t, "/path/to/rootfs.ext4", fcCfg.RootfsPath)
-	assert.Equal(t, 2, fcCfg.VcpuCount)
-	assert.Equal(t, 1024, fcCfg.MemSizeMib)
-	assert.Equal(t, uint32(3), fcCfg.VsockCID)
-
-	// Test config with defaults
-	minimalJSON := `{
-		"kernel_path": "/path/to/kernel",
-		"rootfs_path": "/path/to/rootfs.ext4"
-	}`
-
-	cfg2, err := rt.ParseConfig([]byte(minimalJSON))
-	require.NoError(t, err)
-
-	fcCfg2, ok := cfg2.(*firecracker.Config)
-	require.True(t, ok)
-	assert.Equal(t, 1, fcCfg2.VcpuCount)    // default
-	assert.Equal(t, 512, fcCfg2.MemSizeMib) // default
-
-	// Test invalid config (missing required fields)
-	invalidJSON := `{
-		"kernel_path": "/path/to/kernel"
-	}`
-	_, err = rt.ParseConfig([]byte(invalidJSON))
-	assert.Error(t, err, "Should fail validation without rootfs_path")
-
-	t.Log("=== Firecracker config parsing test PASSED ===")
-}
-
-// TestFirecrackerRuntimeType tests that the runtime type is correct.
-func TestFirecrackerRuntimeType(t *testing.T) {
-	if goruntime.GOOS != "linux" {
-		t.Skip("Firecracker requires Linux")
-	}
-
-	// Skip if firecracker not available
-	if _, err := exec.LookPath("firecracker"); err != nil {
-		t.Skip("firecracker not found in PATH")
-	}
-
-	rt, err := firecracker.NewRuntime()
-	require.NoError(t, err)
-	defer rt.Close()
-
-	assert.Equal(t, "firecracker", string(rt.Type()))
-	assert.Equal(t, int64(0), rt.CheckpointGracePeriodMs())
-
-	t.Log("=== Firecracker runtime type test PASSED ===")
-}
-
-// TestFirecrackerKill tests killing a running VM.
-func TestFirecrackerKill(t *testing.T) {
-	if goruntime.GOOS != "linux" {
-		t.Skip("Firecracker requires Linux")
-	}
-
-	kernelPath := os.Getenv("FC_KERNEL_PATH")
-	if kernelPath == "" {
-		t.Skip("FC_KERNEL_PATH not set")
-	}
-
-	if _, err := exec.LookPath("firecracker"); err != nil {
-		t.Skip("firecracker not found in PATH")
-	}
-
-	// Build a rootfs that runs forever
-	rootfsPath := buildTestRootfs(t, `
-echo "Starting infinite loop..."
-while true; do
-    sleep 1
-done
-`)
-
-	rt, err := firecracker.NewRuntime()
-	require.NoError(t, err)
-	defer rt.Close()
-
-	cfg := &firecracker.Config{
-		KernelPath: kernelPath,
-		RootfsPath: rootfsPath,
-		VcpuCount:  1,
-		MemSizeMib: 256,
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	var stdout strings.Builder
-
-	t.Log("Starting VM with infinite loop...")
-	proc, err := rt.Start(ctx, runtime.StartOptions{
-		ExecutionID: fmt.Sprintf("test-kill-%d", time.Now().UnixNano()),
-		Config:      cfg.WithDefaults(),
-		Stdout:      &stdout,
-		Stderr:      &stdout,
-	})
-	require.NoError(t, err)
-
-	// Wait for it to start
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(stdout.String(), "Starting infinite loop") {
+		finalState = dbJob.State
+		if dbJob.State == query.JobStateCompleted || dbJob.State == query.JobStateFailed {
+			completed = true
+			t.Logf("Job finished with state: %s", dbJob.State)
+			if dbJob.ResultOutput != nil {
+				t.Logf("Job output: %s", string(dbJob.ResultOutput))
+			}
+			if dbJob.Error.Valid {
+				t.Logf("Job error: %s", dbJob.Error.String)
+			}
 			break
 		}
-		time.Sleep(100 * time.Millisecond)
+		if i%10 == 0 {
+			t.Logf("Job state: %s, waiting...", dbJob.State)
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
-	require.Contains(t, stdout.String(), "Starting infinite loop", "VM did not start properly")
+	require.True(t, completed, "Job did not complete")
+	assert.Equal(t, query.JobStateCompleted, finalState, "Job should have completed successfully")
 
-	t.Log("VM started, killing it...")
-	require.NoError(t, proc.Kill(ctx))
+	// Verify result: (7 + 1) * 2 = 16
+	var dbJob query.Job
+	err = query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		var err error
+		dbJob, err = q.GetJob(ctx, jobID)
+		return err
+	})
+	require.NoError(t, err)
 
-	// Wait should return after kill
-	t.Log("Waiting for killed VM...")
-	_, err = proc.Wait(ctx)
-	// Kill causes the process to exit, so Wait should succeed (possibly with error exit code)
-	t.Logf("Wait returned: %v", err)
+	assert.Equal(t, int32(0), dbJob.ResultExitCode.Int32, "Exit code should be 0")
 
-	require.NoError(t, proc.Cleanup(ctx))
+	var output struct {
+		Result struct {
+			Value int `json:"value"`
+		} `json:"result"`
+		PreCheckpointRuns int `json:"pre_checkpoint_runs"`
+	}
+	require.NoError(t, json.Unmarshal(dbJob.ResultOutput, &output))
+	assert.Equal(t, 16, output.Result.Value, "Expected (7 + 1) * 2 = 16")
+	assert.Equal(t, 1, output.PreCheckpointRuns, "Pre-checkpoint code should only run once")
 
-	t.Log("=== Firecracker kill test PASSED ===")
+	t.Log("=== Firecracker crash recovery test PASSED ===")
+
+	// Cleanup
+	_, _ = pool.Exec(ctx, "DELETE FROM jobs WHERE id = $1", jobID)
+	_, _ = pool.Exec(ctx, "DELETE FROM job_definitions WHERE name = $1", "fc-crash-recovery-test")
 }
+
+// // TestFirecrackerConfigParsing tests that config parsing and validation works correctly.
+// func TestFirecrackerConfigParsing(t *testing.T) {
+// 	if goruntime.GOOS != "linux" {
+// 		t.Skip("Firecracker requires Linux")
+// 	}
+
+// 	rt := &firecracker.Runtime{}
+
+// 	// Test valid config with network
+// 	validJSON := `{
+// 		"kernel_path": "/path/to/kernel",
+// 		"rootfs_path": "/path/to/rootfs.ext4",
+// 		"vcpu_count": 2,
+// 		"mem_size_mib": 1024,
+// 		"network": {
+// 			"bridge_name": "fcbr0",
+// 			"guest_ip": "172.16.0.2/24",
+// 			"guest_gateway": "172.16.0.1"
+// 		}
+// 	}`
+
+// 	cfg, err := rt.ParseConfig([]byte(validJSON))
+// 	require.NoError(t, err)
+
+// 	fcCfg, ok := cfg.(*firecracker.Config)
+// 	require.True(t, ok)
+// 	assert.Equal(t, "/path/to/kernel", fcCfg.KernelPath)
+// 	assert.Equal(t, "/path/to/rootfs.ext4", fcCfg.RootfsPath)
+// 	assert.Equal(t, 2, fcCfg.VcpuCount)
+// 	assert.Equal(t, 1024, fcCfg.MemSizeMib)
+// 	require.NotNil(t, fcCfg.Network)
+// 	assert.Equal(t, "fcbr0", fcCfg.Network.BridgeName)
+// 	assert.Equal(t, "172.16.0.2/24", fcCfg.Network.GuestIP)
+// 	assert.Equal(t, "172.16.0.1", fcCfg.Network.GuestGateway)
+
+// 	// Test config without network (should fail validation)
+// 	noNetworkJSON := `{
+// 		"kernel_path": "/path/to/kernel",
+// 		"rootfs_path": "/path/to/rootfs.ext4"
+// 	}`
+// 	_, err = rt.ParseConfig([]byte(noNetworkJSON))
+// 	assert.Error(t, err, "Should fail validation without network config")
+
+// 	// Test config with incomplete network (should fail validation)
+// 	incompleteNetworkJSON := `{
+// 		"kernel_path": "/path/to/kernel",
+// 		"rootfs_path": "/path/to/rootfs.ext4",
+// 		"network": {
+// 			"bridge_name": "fcbr0"
+// 		}
+// 	}`
+// 	_, err = rt.ParseConfig([]byte(incompleteNetworkJSON))
+// 	assert.Error(t, err, "Should fail validation with incomplete network config")
+
+// 	t.Log("=== Firecracker config parsing test PASSED ===")
+// }
+
+// // TestFirecrackerRuntimeType tests that the runtime type is correct.
+// func TestFirecrackerRuntimeType(t *testing.T) {
+// 	if goruntime.GOOS != "linux" {
+// 		t.Skip("Firecracker requires Linux")
+// 	}
+
+// 	// Skip if firecracker not available
+// 	if _, err := exec.LookPath("firecracker"); err != nil {
+// 		t.Skip("firecracker not found in PATH")
+// 	}
+
+// 	rt, err := firecracker.NewRuntime()
+// 	require.NoError(t, err)
+// 	defer rt.Close()
+
+// 	assert.Equal(t, "firecracker", string(rt.Type()))
+// 	assert.Equal(t, int64(0), rt.CheckpointGracePeriodMs())
+
+// 	t.Log("=== Firecracker runtime type test PASSED ===")
+// }

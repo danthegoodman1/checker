@@ -70,7 +70,7 @@ type Config struct {
 	BootArgs string `json:"boot_args"`
 
 	// Network configures TAP networking for the VM.
-	// Required for hypervisor integration (VM must communicate with hypervisor API).
+	// Required - the VM must be able to communicate with the hypervisor API over HTTP.
 	// The rootfs /init script must configure networking in the guest.
 	Network *NetworkConfig `json:"network" validate:"required"`
 }
