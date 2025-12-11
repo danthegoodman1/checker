@@ -46,12 +46,6 @@ WHERE state IN ('suspended', 'pending_retry') AND resume_at IS NOT NULL AND resu
 ORDER BY resume_at ASC
 LIMIT $2;
 
--- name: UpdateJobSuspendedForRecovery :exec
-UPDATE jobs SET
-    state = 'suspended',
-    resume_at = $2
-WHERE id = $1;
-
 -- name: GetNonTerminalJobs :many
 SELECT * FROM jobs WHERE state NOT IN ('completed', 'failed');
 
