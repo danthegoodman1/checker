@@ -115,7 +115,7 @@ func TestCrashRecoveryHypervisor(t *testing.T) {
 	var suspended bool
 	for i := 0; i < 100; i++ { // Wait up to 10 seconds
 		var dbJob query.Job
-		err := query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		err := query.ReliableExecInTx(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 			var err error
 			dbJob, err = q.GetJob(ctx, jobID)
 			return err
@@ -184,7 +184,7 @@ func TestCrashRecoveryHypervisor(t *testing.T) {
 	var finalState query.JobState
 	for i := 0; i < 200; i++ { // Wait up to 20 seconds
 		var dbJob query.Job
-		err := query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		err := query.ReliableExecInTx(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 			var err error
 			dbJob, err = q.GetJob(ctx, jobID)
 			return err
@@ -219,7 +219,7 @@ func TestCrashRecoveryHypervisor(t *testing.T) {
 
 	// Verify the result from database
 	var dbJob query.Job
-	err = query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+	err = query.ReliableExecInTx(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 		var err error
 		dbJob, err = q.GetJob(ctx, jobID)
 		return err
@@ -348,7 +348,7 @@ func TestCrashRecoveryPendingJob(t *testing.T) {
 	var finalState query.JobState
 	for i := 0; i < 200; i++ { // Wait up to 20 seconds
 		var dbJob query.Job
-		err := query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		err := query.ReliableExecInTx(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 			var err error
 			dbJob, err = q.GetJob(ctx, jobID)
 			return err
@@ -377,7 +377,7 @@ func TestCrashRecoveryPendingJob(t *testing.T) {
 
 	// Verify result from database: (7 + 1) * 2 = 16
 	var dbJob query.Job
-	err = query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+	err = query.ReliableExecInTx(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 		var err error
 		dbJob, err = q.GetJob(ctx, jobID)
 		return err
@@ -484,7 +484,7 @@ func TestCrashRecoveryFullServerCrash(t *testing.T) {
 	var suspended bool
 	for i := 0; i < 60; i++ {
 		var dbJob query.Job
-		err := query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		err := query.ReliableExecInTx(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 			var err error
 			dbJob, err = q.GetJob(ctx, jobID)
 			return err
@@ -553,7 +553,7 @@ func TestCrashRecoveryFullServerCrash(t *testing.T) {
 	var finalState query.JobState
 	for i := 0; i < 120; i++ {
 		var dbJob query.Job
-		err := query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		err := query.ReliableExecInTx(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 			var err error
 			dbJob, err = q.GetJob(ctx, jobID)
 			return err
@@ -588,7 +588,7 @@ func TestCrashRecoveryFullServerCrash(t *testing.T) {
 
 	// Verify the result from database: (3 + 1) * 2 = 8
 	var dbJob query.Job
-	err = query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+	err = query.ReliableExecInTx(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 		var err error
 		dbJob, err = q.GetJob(ctx, jobID)
 		return err
@@ -719,7 +719,7 @@ func TestCrashRecoveryProcessCrashRestoreFromCheckpoint(t *testing.T) {
 	var checkpointed bool
 	for i := 0; i < 60; i++ {
 		var dbJob query.Job
-		err := query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		err := query.ReliableExecInTx(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 			var err error
 			dbJob, err = q.GetJob(ctx, jobID)
 			return err
@@ -757,7 +757,7 @@ func TestCrashRecoveryProcessCrashRestoreFromCheckpoint(t *testing.T) {
 	var finalState query.JobState
 	for i := 0; i < 120; i++ {
 		var dbJob query.Job
-		err := query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		err := query.ReliableExecInTx(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 			var err error
 			dbJob, err = q.GetJob(ctx, jobID)
 			return err
@@ -801,7 +801,7 @@ func TestCrashRecoveryProcessCrashRestoreFromCheckpoint(t *testing.T) {
 
 	// Verify the result from database: (5 + 1) * 2 = 12
 	var dbJob query.Job
-	err = query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+	err = query.ReliableExecInTx(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 		var err error
 		dbJob, err = q.GetJob(ctx, jobID)
 		return err

@@ -15,79 +15,7 @@ The hypervisor is a well-designed system for managing checkpointable/snapshottab
 
 ## Complexity Analysis & Recommendations
 
-### 1. Command Loop Boilerplate (Medium Impact)
-
-**Current State:**
-
-The JobRunner uses an actor pattern with 11 command types. Each public method is ~15 lines of channel send/receive boilerplate:
-
-```go
-func (r *JobRunner) Start() error {
-    resultChan := make(chan commandResult, 1)
-    select {
-    case r.cmdChan <- command{typ: cmdStart, ctx: r.ctx, resultChan: resultChan}:
-    case <-r.doneChan:
-        return fmt.Errorf("job runner stopped")
-    }
-
-    select {
-    case result := <-resultChan:
-        return result.err
-    case <-r.doneChan:
-        return fmt.Errorf("job runner stopped")
-    }
-}
-```
-
-This pattern is duplicated 9 times. While correct, it's verbose.
-
-**Recommendation:**
-
-Extract a helper method:
-
-```go
-func (r *JobRunner) sendCommand(cmd command) commandResult {
-    select {
-    case r.cmdChan <- cmd:
-    case <-r.doneChan:
-        return commandResult{err: fmt.Errorf("job runner stopped")}
-    }
-    select {
-    case result := <-cmd.resultChan:
-        return result
-    case <-r.doneChan:
-        return commandResult{err: fmt.Errorf("job runner stopped")}
-    }
-}
-```
-
-This could reduce the public API methods by ~100 lines.
-
----
-
-### 2. Checkpoint Request Collapsing (Low Impact)
-
-**Current State:**
-
-When checkpoint is in progress, subsequent requests are collapsed:
-
-```go
-if r.job.CurrentOperation == JobOpCheckpointing {
-    r.logger.Debug().Str("token", cmd.token).Msg("checkpoint already in progress, collapsing request")
-    r.pendingCheckpointRequests = append(r.pendingCheckpointRequests, cmd.resultChan)
-    return
-}
-```
-
-**Question:** Does this happen in practice? Workers typically don't issue concurrent checkpoint requests.
-
-**Recommendation:**
-
-If this is defensive code that never triggers, consider removing it. The idempotency token already handles retries after restore.
-
----
-
-### 3. ResultWaiters Pattern (Low Impact)
+### 1. ResultWaiters Pattern (Low Impact)
 
 **Current State:**
 
@@ -116,7 +44,7 @@ This indirection could be simplified.
 
 ---
 
-### 4. Recovery Code Paths (Documentation Issue)
+### 2. Recovery Code Paths (Documentation Issue)
 
 **Current State:**
 
@@ -141,7 +69,7 @@ Consider unifying into a single recovery path or at minimum add a comment block 
 
 ---
 
-### 5. Database Persistence Inconsistency
+### 3. Database Persistence Inconsistency
 
 **Current State:**
 
@@ -165,14 +93,10 @@ Standardize on one pattern (likely `ReliableExecInTx` for consistency) unless th
 
 | Change | Lines Reduced | Risk | Effort |
 |--------|--------------|------|--------|
-| 1. Unify wake mechanism (poller only) | ~40 | Low | Low |
-| 2. Extract command helper | ~100 | Low | Low |
-| 3. Remove checkpoint collapsing | ~30 | Low | Low |
-| 4. Simplify result waiters | ~20 | Low | Low |
+| 1. Simplify result waiters | ~20 | Low | Low |
 
 ---
 
-## Top 2 Recommendations
+## Top Recommendation
 
-1. **Unify wake mechanism** - Simplest change, biggest clarity improvement
-2. **Extract command helper** - Pure refactor, no behavior change
+1. **Simplify result waiters** - Minor cleanup to reduce indirection

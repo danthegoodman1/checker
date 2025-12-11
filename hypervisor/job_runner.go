@@ -723,7 +723,7 @@ func (r *JobRunner) handleRetry(cmd command) {
 		r.job.ResumeAt = nil
 
 		now := time.Now()
-		if dbErr := query.ReliableExec(r.ctx, r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+		if dbErr := query.ReliableExecInTx(r.ctx, r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 			return q.UpdateJobStarted(ctx, query.UpdateJobStartedParams{
 				ID:        r.job.ID,
 				StartedAt: sql.NullTime{Time: now, Valid: true},

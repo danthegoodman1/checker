@@ -572,7 +572,7 @@ func (h *Hypervisor) ListJobs(ctx context.Context, limit int32, cursor string) (
 	}
 
 	var dbJobs []query.Job
-	err := query.ReliableExec(ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+	err := query.ReliableExecInTx(ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 		var err error
 		dbJobs, err = q.ListJobs(ctx, params)
 		return err
@@ -713,7 +713,7 @@ func (h *Hypervisor) maybeEvictJob(jobID string, job *Job) {
 // loadJobFromDB loads a job from the database by ID.
 func (h *Hypervisor) loadJobFromDB(ctx context.Context, id string) (*Job, error) {
 	var dbJob query.Job
-	err := query.ReliableExec(ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+	err := query.ReliableExecInTx(ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 		var err error
 		dbJob, err = q.GetJob(ctx, id)
 		return err
@@ -805,7 +805,7 @@ func (h *Hypervisor) RecoverState(ctx context.Context) error {
 // recoverJobs recovers non-terminal jobs from the database.
 func (h *Hypervisor) recoverJobs(ctx context.Context) error {
 	var dbJobs []query.Job
-	err := query.ReliableExec(ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+	err := query.ReliableExecInTx(ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 		var err error
 		dbJobs, err = q.GetNonTerminalJobs(ctx)
 		return err
@@ -960,7 +960,7 @@ func (h *Hypervisor) markJobAsFailed(ctx context.Context, jobID string, errorMsg
 // recoverJobDefinitions loads job definitions from the database and registers them.
 func (h *Hypervisor) recoverJobDefinitions(ctx context.Context) error {
 	var dbDefs []query.JobDefinition
-	err := query.ReliableExec(ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+	err := query.ReliableExecInTx(ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 		var err error
 		dbDefs, err = q.ListJobDefinitions(ctx)
 		return err
@@ -1065,7 +1065,7 @@ func (h *Hypervisor) startResumePoller() {
 // resumeReadyJobs queries for suspended and pending_retry jobs that are ready to resume.
 func (h *Hypervisor) resumeReadyJobs() {
 	var dbJobs []query.Job
-	err := query.ReliableExec(h.ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
+	err := query.ReliableExecInTx(h.ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
 		var err error
 		dbJobs, err = q.GetJobsToResume(ctx, query.GetJobsToResumeParams{
 			ResumeAt: utils.SQLNullTime(time.Now()),
