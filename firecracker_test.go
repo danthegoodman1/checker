@@ -316,7 +316,7 @@ func TestFirecrackerCrashRecovery(t *testing.T) {
 	jobID, err := h1.Spawn(ctx, hypervisor.SpawnOptions{
 		DefinitionName:    "fc-crash-recovery-test",
 		DefinitionVersion: "1.0.0",
-		Params:            json.RawMessage(`{"number": 7, "suspend_duration": "3s"}`),
+		Params:            json.RawMessage(`{"number": 7, "suspend_duration": "1s"}`),
 		Stdout:            &testLogWriter{t: t, prefix: "[fc-stdout]"},
 		Stderr:            &testLogWriter{t: t, prefix: "[fc-stderr]"},
 	})
