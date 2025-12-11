@@ -59,16 +59,29 @@ async function checkpoint(suspendDuration, maxRetries = 5) {
   }
 }
 
-async function exit(exitCode, output) {
-  const resp = await fetch(`http://${apiUrl}/jobs/${jobId}/exit`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ exit_code: exitCode, output }),
-  })
-  if (!resp.ok) {
-    throw new Error(`Exit failed: ${resp.status} ${await resp.text()}`)
+async function exit(exitCode, output, maxRetries = 5) {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const resp = await fetch(`http://${apiUrl}/jobs/${jobId}/exit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ exit_code: exitCode, output }),
+      })
+      if (!resp.ok) {
+        throw new Error(`Exit failed: ${resp.status} ${await resp.text()}`)
+      }
+      process.exit(exitCode)
+    } catch (err) {
+      if (attempt < maxRetries - 1) {
+        console.log(
+          `Exit request failed (attempt ${attempt + 1}/${maxRetries}), retrying: ${err.message}`
+        )
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        continue
+      }
+      throw err
+    }
   }
-  process.exit(exitCode)
 }
 
 async function getParams() {
