@@ -13,8 +13,6 @@ import (
 
 	"github.com/danthegoodman1/checker/hypervisor"
 	"github.com/danthegoodman1/checker/migrations"
-	"github.com/danthegoodman1/checker/pg"
-	"github.com/danthegoodman1/checker/query"
 	"github.com/danthegoodman1/checker/runtime"
 	"github.com/danthegoodman1/checker/runtime/firecracker"
 	"github.com/danthegoodman1/checker/utils"
@@ -185,77 +183,58 @@ func TestFirecrackerHypervisorIntegration(t *testing.T) {
 	t.Log("Waiting for job to be suspended...")
 	var suspended bool
 	for i := 0; i < 120; i++ { // Wait up to 60 seconds (Firecracker boot can be slower)
-		var dbJob query.Job
-		err := query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
-			var err error
-			dbJob, err = q.GetJob(ctx, jobID)
-			return err
-		})
+		job, err := h.GetJob(ctx, jobID)
 		require.NoError(t, err)
 
-		if dbJob.State == query.JobStateSuspended {
+		if job.State == hypervisor.JobStateSuspended {
 			suspended = true
-			t.Logf("Job is now suspended (checkpoint_count=%d)", dbJob.CheckpointCount)
+			t.Logf("Job is now suspended (checkpoint_count=%d)", job.CheckpointCount)
 			break
 		}
-		if dbJob.State == query.JobStateFailed {
-			t.Fatalf("Job failed with error: %s", dbJob.Error.String)
+		if job.State == hypervisor.JobStateFailed {
+			t.Fatalf("Job failed with error: %s", job.Error)
 		}
 		if i%10 == 0 {
-			t.Logf("Job state: %s, waiting...", dbJob.State)
+			t.Logf("Job state: %s, waiting...", job.State)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 	require.True(t, suspended, "Job did not reach suspended state")
 
-	// Update suspend_until to trigger immediate wake
-	t.Log("Triggering immediate wake...")
-	_, err = pool.Exec(ctx, "UPDATE jobs SET suspend_until = NOW() WHERE id = $1", jobID)
-	require.NoError(t, err)
-
-	// Wait for job to complete
+	// Wait for job to complete (wake poller will restore it after suspend_duration)
 	t.Log("Waiting for job to complete...")
 	var completed bool
-	var finalState query.JobState
+	var finalState hypervisor.JobState
 	for i := 0; i < 120; i++ {
-		var dbJob query.Job
-		err := query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
-			var err error
-			dbJob, err = q.GetJob(ctx, jobID)
-			return err
-		})
+		job, err := h.GetJob(ctx, jobID)
 		require.NoError(t, err)
 
-		finalState = dbJob.State
-		if dbJob.State == query.JobStateCompleted || dbJob.State == query.JobStateFailed {
+		finalState = job.State
+		if job.State == hypervisor.JobStateCompleted || job.State == hypervisor.JobStateFailed {
 			completed = true
-			t.Logf("Job finished with state: %s", dbJob.State)
-			if dbJob.ResultOutput != nil {
-				t.Logf("Job output: %s", string(dbJob.ResultOutput))
+			t.Logf("Job finished with state: %s", job.State)
+			if job.Result != nil && job.Result.Output != nil {
+				t.Logf("Job output: %s", string(job.Result.Output))
 			}
-			if dbJob.Error.Valid {
-				t.Logf("Job error: %s", dbJob.Error.String)
+			if job.Error != "" {
+				t.Logf("Job error: %s", job.Error)
 			}
 			break
 		}
 		if i%10 == 0 {
-			t.Logf("Job state: %s, waiting...", dbJob.State)
+			t.Logf("Job state: %s, waiting...", job.State)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 	require.True(t, completed, "Job did not complete")
-	assert.Equal(t, query.JobStateCompleted, finalState, "Job should have completed successfully")
+	assert.Equal(t, hypervisor.JobStateCompleted, finalState, "Job should have completed successfully")
 
 	// Verify result
-	var dbJob query.Job
-	err = query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
-		var err error
-		dbJob, err = q.GetJob(ctx, jobID)
-		return err
-	})
+	job, err := h.GetJob(ctx, jobID)
 	require.NoError(t, err)
 
-	assert.Equal(t, int32(0), dbJob.ResultExitCode.Int32, "Exit code should be 0")
+	require.NotNil(t, job.Result, "Job result should not be nil")
+	assert.Equal(t, 0, job.Result.ExitCode, "Exit code should be 0")
 
 	var output struct {
 		Result struct {
@@ -264,7 +243,7 @@ func TestFirecrackerHypervisorIntegration(t *testing.T) {
 		} `json:"result"`
 		PreCheckpointRuns int `json:"pre_checkpoint_runs"`
 	}
-	require.NoError(t, json.Unmarshal(dbJob.ResultOutput, &output))
+	require.NoError(t, json.Unmarshal(job.Result.Output, &output))
 	assert.Equal(t, 12, output.Result.Value, "Expected (5 + 1) * 2 = 12")
 	assert.Equal(t, 1, output.PreCheckpointRuns, "Pre-checkpoint code should only run once")
 
@@ -337,7 +316,7 @@ func TestFirecrackerCrashRecovery(t *testing.T) {
 	jobID, err := h1.Spawn(ctx, hypervisor.SpawnOptions{
 		DefinitionName:    "fc-crash-recovery-test",
 		DefinitionVersion: "1.0.0",
-		Params:            json.RawMessage(`{"number": 7, "suspend_duration": "5s"}`),
+		Params:            json.RawMessage(`{"number": 7, "suspend_duration": "1s"}`),
 		Stdout:            &testLogWriter{t: t, prefix: "[fc-stdout]"},
 		Stderr:            &testLogWriter{t: t, prefix: "[fc-stderr]"},
 	})
@@ -348,21 +327,16 @@ func TestFirecrackerCrashRecovery(t *testing.T) {
 	t.Log("Waiting for job to be suspended...")
 	var suspended bool
 	for i := 0; i < 120; i++ {
-		var dbJob query.Job
-		err := query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
-			var err error
-			dbJob, err = q.GetJob(ctx, jobID)
-			return err
-		})
+		job, err := h1.GetJob(ctx, jobID)
 		require.NoError(t, err)
 
-		if dbJob.State == query.JobStateSuspended {
+		if job.State == hypervisor.JobStateSuspended {
 			suspended = true
 			t.Logf("Job is now suspended")
 			break
 		}
-		if dbJob.State == query.JobStateFailed {
-			t.Fatalf("Job failed with error: %s", dbJob.Error.String)
+		if job.State == hypervisor.JobStateFailed {
+			t.Fatalf("Job failed with error: %s", job.Error)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
@@ -398,54 +372,40 @@ func TestFirecrackerCrashRecovery(t *testing.T) {
 	t.Log("Calling RecoverState()...")
 	require.NoError(t, h2.RecoverState(ctx))
 
-	// Update suspend_until to trigger immediate wake
-	t.Log("Updating suspend_until to trigger immediate wake...")
-	_, err = pool.Exec(ctx, "UPDATE jobs SET suspend_until = NOW() WHERE id = $1", jobID)
-	require.NoError(t, err)
-
-	// Wait for job to complete
+	// Wait for job to complete (wake poller will restore it after suspend_duration)
 	t.Log("Waiting for job to complete...")
 	var completed bool
-	var finalState query.JobState
+	var finalState hypervisor.JobState
 	for i := 0; i < 120; i++ {
-		var dbJob query.Job
-		err := query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
-			var err error
-			dbJob, err = q.GetJob(ctx, jobID)
-			return err
-		})
+		job, err := h2.GetJob(ctx, jobID)
 		require.NoError(t, err)
 
-		finalState = dbJob.State
-		if dbJob.State == query.JobStateCompleted || dbJob.State == query.JobStateFailed {
+		finalState = job.State
+		if job.State == hypervisor.JobStateCompleted || job.State == hypervisor.JobStateFailed {
 			completed = true
-			t.Logf("Job finished with state: %s", dbJob.State)
-			if dbJob.ResultOutput != nil {
-				t.Logf("Job output: %s", string(dbJob.ResultOutput))
+			t.Logf("Job finished with state: %s", job.State)
+			if job.Result != nil && job.Result.Output != nil {
+				t.Logf("Job output: %s", string(job.Result.Output))
 			}
-			if dbJob.Error.Valid {
-				t.Logf("Job error: %s", dbJob.Error.String)
+			if job.Error != "" {
+				t.Logf("Job error: %s", job.Error)
 			}
 			break
 		}
 		if i%10 == 0 {
-			t.Logf("Job state: %s, waiting...", dbJob.State)
+			t.Logf("Job state: %s, waiting...", job.State)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 	require.True(t, completed, "Job did not complete")
-	assert.Equal(t, query.JobStateCompleted, finalState, "Job should have completed successfully")
+	assert.Equal(t, hypervisor.JobStateCompleted, finalState, "Job should have completed successfully")
 
 	// Verify result: (7 + 1) * 2 = 16
-	var dbJob query.Job
-	err = query.ReliableExec(ctx, pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
-		var err error
-		dbJob, err = q.GetJob(ctx, jobID)
-		return err
-	})
+	job, err := h2.GetJob(ctx, jobID)
 	require.NoError(t, err)
 
-	assert.Equal(t, int32(0), dbJob.ResultExitCode.Int32, "Exit code should be 0")
+	require.NotNil(t, job.Result, "Job result should not be nil")
+	assert.Equal(t, 0, job.Result.ExitCode, "Exit code should be 0")
 
 	var output struct {
 		Result struct {
@@ -453,7 +413,7 @@ func TestFirecrackerCrashRecovery(t *testing.T) {
 		} `json:"result"`
 		PreCheckpointRuns int `json:"pre_checkpoint_runs"`
 	}
-	require.NoError(t, json.Unmarshal(dbJob.ResultOutput, &output))
+	require.NoError(t, json.Unmarshal(job.Result.Output, &output))
 	assert.Equal(t, 16, output.Result.Value, "Expected (7 + 1) * 2 = 16")
 	assert.Equal(t, 1, output.PreCheckpointRuns, "Pre-checkpoint code should only run once")
 
@@ -463,81 +423,3 @@ func TestFirecrackerCrashRecovery(t *testing.T) {
 	_, _ = pool.Exec(ctx, "DELETE FROM jobs WHERE id = $1", jobID)
 	_, _ = pool.Exec(ctx, "DELETE FROM job_definitions WHERE name = $1", "fc-crash-recovery-test")
 }
-
-// // TestFirecrackerConfigParsing tests that config parsing and validation works correctly.
-// func TestFirecrackerConfigParsing(t *testing.T) {
-// 	if goruntime.GOOS != "linux" {
-// 		t.Skip("Firecracker requires Linux")
-// 	}
-
-// 	rt := &firecracker.Runtime{}
-
-// 	// Test valid config with network
-// 	validJSON := `{
-// 		"kernel_path": "/path/to/kernel",
-// 		"rootfs_path": "/path/to/rootfs.ext4",
-// 		"vcpu_count": 2,
-// 		"mem_size_mib": 1024,
-// 		"network": {
-// 			"bridge_name": "fcbr0",
-// 			"guest_ip": "172.16.0.2/24",
-// 			"guest_gateway": "172.16.0.1"
-// 		}
-// 	}`
-
-// 	cfg, err := rt.ParseConfig([]byte(validJSON))
-// 	require.NoError(t, err)
-
-// 	fcCfg, ok := cfg.(*firecracker.Config)
-// 	require.True(t, ok)
-// 	assert.Equal(t, "/path/to/kernel", fcCfg.KernelPath)
-// 	assert.Equal(t, "/path/to/rootfs.ext4", fcCfg.RootfsPath)
-// 	assert.Equal(t, 2, fcCfg.VcpuCount)
-// 	assert.Equal(t, 1024, fcCfg.MemSizeMib)
-// 	require.NotNil(t, fcCfg.Network)
-// 	assert.Equal(t, "fcbr0", fcCfg.Network.BridgeName)
-// 	assert.Equal(t, "172.16.0.2/24", fcCfg.Network.GuestIP)
-// 	assert.Equal(t, "172.16.0.1", fcCfg.Network.GuestGateway)
-
-// 	// Test config without network (should fail validation)
-// 	noNetworkJSON := `{
-// 		"kernel_path": "/path/to/kernel",
-// 		"rootfs_path": "/path/to/rootfs.ext4"
-// 	}`
-// 	_, err = rt.ParseConfig([]byte(noNetworkJSON))
-// 	assert.Error(t, err, "Should fail validation without network config")
-
-// 	// Test config with incomplete network (should fail validation)
-// 	incompleteNetworkJSON := `{
-// 		"kernel_path": "/path/to/kernel",
-// 		"rootfs_path": "/path/to/rootfs.ext4",
-// 		"network": {
-// 			"bridge_name": "fcbr0"
-// 		}
-// 	}`
-// 	_, err = rt.ParseConfig([]byte(incompleteNetworkJSON))
-// 	assert.Error(t, err, "Should fail validation with incomplete network config")
-
-// 	t.Log("=== Firecracker config parsing test PASSED ===")
-// }
-
-// // TestFirecrackerRuntimeType tests that the runtime type is correct.
-// func TestFirecrackerRuntimeType(t *testing.T) {
-// 	if goruntime.GOOS != "linux" {
-// 		t.Skip("Firecracker requires Linux")
-// 	}
-
-// 	// Skip if firecracker not available
-// 	if _, err := exec.LookPath("firecracker"); err != nil {
-// 		t.Skip("firecracker not found in PATH")
-// 	}
-
-// 	rt, err := firecracker.NewRuntime()
-// 	require.NoError(t, err)
-// 	defer rt.Close()
-
-// 	assert.Equal(t, "firecracker", string(rt.Type()))
-// 	assert.Equal(t, int64(0), rt.CheckpointGracePeriodMs())
-
-// 	t.Log("=== Firecracker runtime type test PASSED ===")
-// }
