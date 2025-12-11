@@ -109,7 +109,7 @@ func New(cfg Config) *Hypervisor {
 	h.callerHTTPServer = http_server.StartHTTPServer(h.callerHTTPAddress, "", h.RegisterCallerAPI)
 	h.runtimeHTTPServer = http_server.StartHTTPServer(h.runtimeHTTPAddress, "", h.RegisterRuntimeAPI)
 
- 	// Start the resume poller for suspended and pending_retry jobs
+	// Start the resume poller for suspended and pending_retry jobs
 	h.startResumePoller()
 
 	return h
