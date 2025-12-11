@@ -812,7 +812,9 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 		return nil, fmt.Errorf("firecracker socket not ready: %w", err)
 	}
 
-	// Load snapshot with network backend config
+	// Load snapshot
+	// Note: Firecracker v1.10 expects the TAP device to exist with the same name
+	// as when the snapshot was created. We recreated it above with the same name.
 	loadReq := map[string]any{
 		"snapshot_path": c.snapshotPath,
 		"mem_backend": map[string]string{
@@ -820,13 +822,7 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 			"backend_path": c.memFilePath,
 		},
 		"enable_diff_snapshots": false,
-		// Map the guest network interface to the new TAP device
-		"net_backend": []map[string]string{
-			{
-				"iface_id":      "eth0",
-				"host_dev_name": tapDeviceName,
-			},
-		},
+		"resume_vm":             true, // Resume immediately after loading
 	}
 
 	if err := handle.api(ctx, "snapshot/load", loadReq); err != nil {
@@ -835,13 +831,7 @@ func (r *Runtime) Restore(ctx context.Context, opts runtime.RestoreOptions) (run
 		return nil, fmt.Errorf("failed to load snapshot: %w", err)
 	}
 
-	// Resume the VM
-	if err := handle.apiPatch(ctx, "vm", map[string]string{"state": "Resumed"}); err != nil {
-		_ = fcCmd.Process.Kill()
-		_ = deleteTAPDevice(tapDeviceName)
-		return nil, fmt.Errorf("failed to resume VM: %w", err)
-	}
-
+	// Note: resume_vm=true in the load request automatically resumes the VM
 	handle.started = true
 	logger.Debug().Msg("Firecracker VM restored from snapshot")
 
