@@ -13,50 +13,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-type JobOperation string
-
-const (
-	JobOperationCheckpointing JobOperation = "checkpointing"
-	JobOperationTerminating   JobOperation = "terminating"
-	JobOperationExiting       JobOperation = "exiting"
-	JobOperationRestarting    JobOperation = "restarting"
-)
-
-func (e *JobOperation) Scan(src interface{}) error {
-	switch s := src.(type) {
-	case []byte:
-		*e = JobOperation(s)
-	case string:
-		*e = JobOperation(s)
-	default:
-		return fmt.Errorf("unsupported scan type for JobOperation: %T", src)
-	}
-	return nil
-}
-
-type NullJobOperation struct {
-	JobOperation JobOperation
-	Valid        bool // Valid is true if JobOperation is not NULL
-}
-
-// Scan implements the Scanner interface.
-func (ns *NullJobOperation) Scan(value interface{}) error {
-	if value == nil {
-		ns.JobOperation, ns.Valid = "", false
-		return nil
-	}
-	ns.Valid = true
-	return ns.JobOperation.Scan(value)
-}
-
-// Value implements the driver Valuer interface.
-func (ns NullJobOperation) Value() (driver.Value, error) {
-	if !ns.Valid {
-		return nil, nil
-	}
-	return string(ns.JobOperation), nil
-}
-
 type JobState string
 
 const (
@@ -124,7 +80,6 @@ type Job struct {
 	RuntimeType       string
 	RuntimeConfig     []byte
 	Metadata          []byte
-	CurrentOperation  NullJobOperation
 }
 
 type JobDefinition struct {
