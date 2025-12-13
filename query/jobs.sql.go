@@ -14,7 +14,7 @@ import (
 )
 
 const getJob = `-- name: GetJob :one
-SELECT id, definition_name, definition_version, state, env, params, result_exit_code, result_output, error, created_at, started_at, completed_at, checkpoint_count, last_checkpoint_at, retry_count, resume_at, checkpoint_path, runtime_type, runtime_config, metadata, current_operation FROM jobs WHERE id = $1
+SELECT id, definition_name, definition_version, state, env, params, result_exit_code, result_output, error, created_at, started_at, completed_at, checkpoint_count, last_checkpoint_at, retry_count, resume_at, checkpoint_path, runtime_type, runtime_config, metadata FROM jobs WHERE id = $1
 `
 
 func (q *Queries) GetJob(ctx context.Context, id string) (Job, error) {
@@ -41,13 +41,12 @@ func (q *Queries) GetJob(ctx context.Context, id string) (Job, error) {
 		&i.RuntimeType,
 		&i.RuntimeConfig,
 		&i.Metadata,
-		&i.CurrentOperation,
 	)
 	return i, err
 }
 
 const getJobsToResume = `-- name: GetJobsToResume :many
-SELECT id, definition_name, definition_version, state, env, params, result_exit_code, result_output, error, created_at, started_at, completed_at, checkpoint_count, last_checkpoint_at, retry_count, resume_at, checkpoint_path, runtime_type, runtime_config, metadata, current_operation FROM jobs
+SELECT id, definition_name, definition_version, state, env, params, result_exit_code, result_output, error, created_at, started_at, completed_at, checkpoint_count, last_checkpoint_at, retry_count, resume_at, checkpoint_path, runtime_type, runtime_config, metadata FROM jobs
 WHERE state IN ('suspended', 'pending_retry') AND resume_at IS NOT NULL AND resume_at <= $1
 ORDER BY resume_at ASC
 LIMIT $2
@@ -88,7 +87,6 @@ func (q *Queries) GetJobsToResume(ctx context.Context, arg GetJobsToResumeParams
 			&i.RuntimeType,
 			&i.RuntimeConfig,
 			&i.Metadata,
-			&i.CurrentOperation,
 		); err != nil {
 			return nil, err
 		}
@@ -101,7 +99,7 @@ func (q *Queries) GetJobsToResume(ctx context.Context, arg GetJobsToResumeParams
 }
 
 const getNonTerminalJobs = `-- name: GetNonTerminalJobs :many
-SELECT id, definition_name, definition_version, state, env, params, result_exit_code, result_output, error, created_at, started_at, completed_at, checkpoint_count, last_checkpoint_at, retry_count, resume_at, checkpoint_path, runtime_type, runtime_config, metadata, current_operation FROM jobs WHERE state NOT IN ('completed', 'failed')
+SELECT id, definition_name, definition_version, state, env, params, result_exit_code, result_output, error, created_at, started_at, completed_at, checkpoint_count, last_checkpoint_at, retry_count, resume_at, checkpoint_path, runtime_type, runtime_config, metadata FROM jobs WHERE state NOT IN ('completed', 'failed')
 `
 
 func (q *Queries) GetNonTerminalJobs(ctx context.Context) ([]Job, error) {
@@ -134,7 +132,6 @@ func (q *Queries) GetNonTerminalJobs(ctx context.Context) ([]Job, error) {
 			&i.RuntimeType,
 			&i.RuntimeConfig,
 			&i.Metadata,
-			&i.CurrentOperation,
 		); err != nil {
 			return nil, err
 		}
@@ -149,8 +146,8 @@ func (q *Queries) GetNonTerminalJobs(ctx context.Context) ([]Job, error) {
 const insertJob = `-- name: InsertJob :exec
 INSERT INTO jobs (
     id, definition_name, definition_version, state, env, params,
-    created_at, runtime_type, runtime_config, metadata, current_operation
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    created_at, runtime_type, runtime_config, metadata
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 `
 
 type InsertJobParams struct {
@@ -164,7 +161,6 @@ type InsertJobParams struct {
 	RuntimeType       string
 	RuntimeConfig     []byte
 	Metadata          []byte
-	CurrentOperation  NullJobOperation
 }
 
 func (q *Queries) InsertJob(ctx context.Context, arg InsertJobParams) error {
@@ -179,13 +175,12 @@ func (q *Queries) InsertJob(ctx context.Context, arg InsertJobParams) error {
 		arg.RuntimeType,
 		arg.RuntimeConfig,
 		arg.Metadata,
-		arg.CurrentOperation,
 	)
 	return err
 }
 
 const listJobs = `-- name: ListJobs :many
-SELECT id, definition_name, definition_version, state, env, params, result_exit_code, result_output, error, created_at, started_at, completed_at, checkpoint_count, last_checkpoint_at, retry_count, resume_at, checkpoint_path, runtime_type, runtime_config, metadata, current_operation FROM jobs
+SELECT id, definition_name, definition_version, state, env, params, result_exit_code, result_output, error, created_at, started_at, completed_at, checkpoint_count, last_checkpoint_at, retry_count, resume_at, checkpoint_path, runtime_type, runtime_config, metadata FROM jobs
 WHERE ($2::TIMESTAMPTZ IS NULL OR
        (created_at, id) < ($2::TIMESTAMPTZ, $3::TEXT))
 ORDER BY created_at DESC, id DESC
@@ -228,7 +223,6 @@ func (q *Queries) ListJobs(ctx context.Context, arg ListJobsParams) ([]Job, erro
 			&i.RuntimeType,
 			&i.RuntimeConfig,
 			&i.Metadata,
-			&i.CurrentOperation,
 		); err != nil {
 			return nil, err
 		}
@@ -246,8 +240,7 @@ UPDATE jobs SET
     checkpoint_count = checkpoint_count + 1,
     last_checkpoint_at = $3,
     resume_at = $4,
-    checkpoint_path = $5,
-    current_operation = NULL
+    checkpoint_path = $5
 WHERE id = $1
 `
 
@@ -276,8 +269,7 @@ UPDATE jobs SET
     completed_at = $3,
     result_exit_code = $4,
     result_output = $5,
-    error = $6,
-    current_operation = NULL
+    error = $6
 WHERE id = $1
 `
 
@@ -302,25 +294,10 @@ func (q *Queries) UpdateJobCompleted(ctx context.Context, arg UpdateJobCompleted
 	return err
 }
 
-const updateJobOperation = `-- name: UpdateJobOperation :exec
-UPDATE jobs SET current_operation = $2 WHERE id = $1
-`
-
-type UpdateJobOperationParams struct {
-	ID               string
-	CurrentOperation NullJobOperation
-}
-
-func (q *Queries) UpdateJobOperation(ctx context.Context, arg UpdateJobOperationParams) error {
-	_, err := q.db.Exec(ctx, updateJobOperation, arg.ID, arg.CurrentOperation)
-	return err
-}
-
 const updateJobPendingRetry = `-- name: UpdateJobPendingRetry :exec
 UPDATE jobs SET
     state = 'pending_retry',
-    resume_at = $2,
-    current_operation = NULL
+    resume_at = $2
 WHERE id = $1
 `
 
@@ -349,7 +326,7 @@ func (q *Queries) UpdateJobRetryCount(ctx context.Context, arg UpdateJobRetryCou
 }
 
 const updateJobStarted = `-- name: UpdateJobStarted :exec
-UPDATE jobs SET state = 'running', started_at = $2, current_operation = NULL WHERE id = $1
+UPDATE jobs SET state = 'running', started_at = $2 WHERE id = $1
 `
 
 type UpdateJobStartedParams struct {
@@ -363,7 +340,7 @@ func (q *Queries) UpdateJobStarted(ctx context.Context, arg UpdateJobStartedPara
 }
 
 const updateJobState = `-- name: UpdateJobState :exec
-UPDATE jobs SET state = $2, current_operation = NULL WHERE id = $1
+UPDATE jobs SET state = $2 WHERE id = $1
 `
 
 type UpdateJobStateParams struct {

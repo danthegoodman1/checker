@@ -314,7 +314,6 @@ func (h *Hypervisor) Spawn(ctx context.Context, opts SpawnOptions) (string, erro
 			RuntimeType:       string(jd.RuntimeType),
 			RuntimeConfig:     runtimeConfigJSON,
 			Metadata:          metadataJSON,
-			CurrentOperation:  query.NullJobOperation{}, // NULL - no operation in progress
 		})
 	})
 	if err != nil {
@@ -737,10 +736,6 @@ func dbJobToJob(dbJob query.Job) *Job {
 		RetryCount:        int(dbJob.RetryCount),
 	}
 
-	if dbJob.CurrentOperation.Valid {
-		job.CurrentOperation = JobOperation(dbJob.CurrentOperation.JobOperation)
-	}
-
 	if len(dbJob.Env) > 0 {
 		var env map[string]string
 		if err := json.Unmarshal(dbJob.Env, &env); err == nil {
@@ -858,22 +853,6 @@ func (h *Hypervisor) recoverJobs(ctx context.Context) error {
 // failed and auto-retry based on the retry policy.
 func (h *Hypervisor) recoverRunningJob(ctx context.Context, dbJob query.Job) error {
 	logger.Info().Str("job_id", dbJob.ID).Msg("recovering running job (was interrupted)")
-
-	// Clear any interrupted operation
-	if dbJob.CurrentOperation.Valid {
-		logger.Info().
-			Str("job_id", dbJob.ID).
-			Str("interrupted_operation", string(dbJob.CurrentOperation.JobOperation)).
-			Msg("clearing interrupted operation")
-		if err := query.ReliableExecInTx(ctx, h.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
-			return q.UpdateJobOperation(ctx, query.UpdateJobOperationParams{
-				ID:               dbJob.ID,
-				CurrentOperation: query.NullJobOperation{}, // NULL
-			})
-		}); err != nil {
-			logger.Error().Err(err).Str("job_id", dbJob.ID).Msg("failed to clear interrupted operation")
-		}
-	}
 
 	if dbJob.CheckpointCount > 0 && dbJob.CheckpointPath.Valid && dbJob.CheckpointPath.String != "" {
 		logger.Info().
