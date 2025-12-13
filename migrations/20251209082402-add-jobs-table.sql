@@ -1,7 +1,6 @@
 
 -- +migrate Up
 CREATE TYPE job_state AS ENUM ('pending', 'running', 'suspended', 'pending_retry', 'completed', 'failed');
-CREATE TYPE job_operation AS ENUM ('checkpointing', 'terminating', 'exiting', 'restarting');
 
 -- Job definitions table - stores registered job definitions for recovery
 CREATE TABLE job_definitions (
@@ -49,10 +48,7 @@ CREATE TABLE jobs (
     runtime_config JSONB NOT NULL,  -- Denormalized from definition for restore
 
     -- Metadata
-    metadata JSONB NOT NULL DEFAULT '{}',
-
-    -- Current in-flight operation (NULL when not in a transient substate)
-    current_operation job_operation
+    metadata JSONB NOT NULL DEFAULT '{}'
 );
 
 -- Index for polling jobs waiting to resume (suspended or pending_retry)
@@ -67,5 +63,4 @@ CREATE INDEX idx_jobs_created_at_id ON jobs (created_at DESC, id DESC);
 -- +migrate Down
 DROP TABLE jobs;
 DROP TABLE job_definitions;
-DROP TYPE job_operation;
 DROP TYPE job_state;

@@ -396,7 +396,6 @@ func (r *JobRunner) handleCheckpoint(cmd command) {
 	}
 
 	r.job.CurrentOperation = JobOpCheckpointing
-	r.persistJobOperation(JobOpCheckpointing)
 	keepRunning := cmd.suspendDuration == 0
 
 	// Update state before stopping container
@@ -529,7 +528,6 @@ func (r *JobRunner) handleKill(cmd command) {
 	}
 
 	r.job.CurrentOperation = JobOpTerminating
-	r.persistJobOperation(JobOpTerminating)
 
 	// For suspended jobs, we don't have a running process to kill
 	if r.process != nil {
@@ -679,7 +677,6 @@ func (r *JobRunner) handleRetry(cmd command) {
 	}
 
 	r.job.CurrentOperation = JobOpRestarting
-	r.persistJobOperation(JobOpRestarting)
 	r.job.RetryCount++
 	r.job.Error = ""
 	r.job.Result = nil
@@ -1055,16 +1052,5 @@ func (r *JobRunner) persistJobState(state query.JobState) {
 		})
 	}); dbErr != nil {
 		r.logger.Error().Err(dbErr).Msg("failed to persist job state to DB")
-	}
-}
-
-func (r *JobRunner) persistJobOperation(op JobOperation) {
-	if dbErr := query.ReliableExecInTx(r.ctx, r.pool, pg.StandardContextTimeout, func(ctx context.Context, q *query.Queries) error {
-		return q.UpdateJobOperation(ctx, query.UpdateJobOperationParams{
-			ID:               r.job.ID,
-			CurrentOperation: query.NullJobOperation{JobOperation: query.JobOperation(op), Valid: true},
-		})
-	}); dbErr != nil {
-		r.logger.Error().Err(dbErr).Msg("failed to persist job operation to DB")
 	}
 }
