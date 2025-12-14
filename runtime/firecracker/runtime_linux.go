@@ -510,6 +510,10 @@ func (r *Runtime) Start(ctx context.Context, opts runtime.StartOptions) (runtime
 	env["CHECKER_API_URL"] = opts.APIHostAddress
 	env["CHECKER_JOB_ID"] = opts.ExecutionID
 
+	// Add IPv6 network configuration derived from execution ID
+	env["CHECKER_GUEST_IP"] = ExecutionIDToIPv6WithCIDR(opts.ExecutionID)
+	env["CHECKER_GATEWAY"] = IPv6Gateway
+
 	if err := injectEnvVars(workRootfs, env); err != nil {
 		return nil, fmt.Errorf("failed to inject environment variables: %w", err)
 	}

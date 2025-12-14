@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,12 +28,16 @@ import (
 // - FC_BRIDGE_NAME: Name of the bridge for TAP networking (default: fcbr0)
 // - PG_DSN: PostgreSQL connection string (required for hypervisor tests)
 //
-// Before running tests, set up the network bridge:
+// Before running tests, set up the network bridge (IPv6):
 //   sudo ip link add fcbr0 type bridge
-//   sudo ip addr add 172.16.0.1/16 dev fcbr0
 //   sudo ip link set fcbr0 up
-//   echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
-//   sudo iptables -t nat -A POSTROUTING -s 172.16.0.0/16 ! -o fcbr0 -j MASQUERADE
+//   sudo sysctl -w net.ipv6.conf.fcbr0.accept_dad=0
+//   sudo sysctl -w net.ipv6.conf.fcbr0.dad_transmits=0
+//   sudo ip -6 addr add fdfc::1/16 dev fcbr0
+//   echo 1 | sudo tee /proc/sys/net/ipv6/conf/all/forwarding
+//   sudo ip6tables -t nat -A POSTROUTING -s fdfc::/16 ! -o fcbr0 -j MASQUERADE
+//   sudo ip6tables -A FORWARD -i fcbr0 -j ACCEPT
+//   sudo ip6tables -A FORWARD -o fcbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT
 //
 // Run with: FC_KERNEL_PATH=/path/to/vmlinux PG_DSN=postgres://... go test -v -run TestFirecracker
 
@@ -60,8 +65,22 @@ func getFirecrackerTestConfig(t *testing.T) (kernelPath, bridgeName string) {
 	// Verify bridge exists
 	cmd := exec.Command("ip", "link", "show", bridgeName)
 	if err := cmd.Run(); err != nil {
-		t.Skipf("Bridge %s not found. Set up with: sudo ip link add %s type bridge && sudo ip addr add 172.16.0.1/16 dev %s && sudo ip link set %s up",
-			bridgeName, bridgeName, bridgeName, bridgeName)
+		t.Skipf("Bridge %s not found. Set up with:\n"+
+			"  sudo ip link add %s type bridge\n"+
+			"  sudo ip -6 addr add fdfc::1/16 dev %s\n"+
+			"  sudo ip link set %s up\n"+
+			"  echo 1 | sudo tee /proc/sys/net/ipv6/conf/all/forwarding\n"+
+			"  sudo ip6tables -t nat -A POSTROUTING -s fdfc::/16 ! -o %s -j MASQUERADE",
+			bridgeName, bridgeName, bridgeName, bridgeName, bridgeName)
+	}
+
+	// Verify bridge has IPv6 address fdfc::1
+	cmd = exec.Command("ip", "-6", "addr", "show", "dev", bridgeName)
+	output, err := cmd.Output()
+	if err != nil || !strings.Contains(string(output), "fdfc::1") {
+		t.Skipf("Bridge %s does not have IPv6 address fdfc::1. Set up with:\n"+
+			"  sudo ip -6 addr add fdfc::1/16 dev %s",
+			bridgeName, bridgeName)
 	}
 
 	return kernelPath, bridgeName
@@ -69,7 +88,8 @@ func getFirecrackerTestConfig(t *testing.T) (kernelPath, bridgeName string) {
 
 // buildFirecrackerRootfs builds a rootfs ext4 image from the checkpoint_restore Dockerfile.
 // Returns the path to the rootfs file.
-func buildFirecrackerRootfs(t *testing.T, guestIP, gateway string) string {
+// Network configuration (IPv6) is injected at runtime by the Firecracker runtime.
+func buildFirecrackerRootfs(t *testing.T) string {
 	t.Helper()
 
 	// Check dependencies
@@ -85,11 +105,11 @@ func buildFirecrackerRootfs(t *testing.T, guestIP, gateway string) string {
 	rootfsPath := filepath.Join(t.TempDir(), "rootfs.ext4")
 
 	// Use the build-fc-rootfs.sh script (run with bash to avoid permission issues)
+	// No network config needed - IPv6 is configured at runtime from env vars
 	scriptPath := filepath.Join(cwd, "scripts", "build-fc-rootfs.sh")
 	dockerfilePath := filepath.Join(cwd, "demo", "Dockerfile.checkpoint_restore")
-	networkConfig := fmt.Sprintf("%s,%s", guestIP, gateway)
 
-	cmd := exec.Command("bash", scriptPath, dockerfilePath, rootfsPath, networkConfig)
+	cmd := exec.Command("bash", scriptPath, dockerfilePath, rootfsPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("Failed to build rootfs: %v\n%s", err, output)
@@ -117,15 +137,13 @@ func TestFirecrackerHypervisorIntegration(t *testing.T) {
 	require.NoError(t, err)
 	defer pool.Close()
 
-	// Build rootfs with networking configured
-	guestIP := "172.16.0.2/16"
-	gateway := "172.16.0.1"
-	rootfsPath := buildFirecrackerRootfs(t, guestIP, gateway)
+	// Build rootfs (IPv6 networking is configured at runtime)
+	rootfsPath := buildFirecrackerRootfs(t)
 
-	// Get unique ports for this test
+	// Get unique ports for this test - use IPv6 gateway address
 	port := portCounter.Add(2)
-	callerAddr := fmt.Sprintf("172.16.0.1:%d", port)    // Use bridge IP so VM can reach it
-	runtimeAddr := fmt.Sprintf("172.16.0.1:%d", port+1) // Use bridge IP
+	callerAddr := fmt.Sprintf("[%s]:%d", firecracker.IPv6Gateway, port)    // Use bridge IP so VM can reach it
+	runtimeAddr := fmt.Sprintf("[%s]:%d", firecracker.IPv6Gateway, port+1) // Use bridge IP
 
 	ctx := context.Background()
 
@@ -159,9 +177,7 @@ func TestFirecrackerHypervisorIntegration(t *testing.T) {
 			VcpuCount:  1,
 			MemSizeMib: 512,
 			Network: &firecracker.NetworkConfig{
-				BridgeName:   bridgeName,
-				GuestIP:      guestIP,
-				GuestGateway: gateway,
+				BridgeName: bridgeName,
 			},
 		},
 	}
@@ -270,14 +286,12 @@ func TestFirecrackerHypervisorCrashRecovery(t *testing.T) {
 	require.NoError(t, err)
 	defer pool.Close()
 
-	// Build rootfs
-	guestIP := "172.16.0.3/16" // Different IP to avoid conflicts
-	gateway := "172.16.0.1"
-	rootfsPath := buildFirecrackerRootfs(t, guestIP, gateway)
+	// Build rootfs (IPv6 networking is configured at runtime)
+	rootfsPath := buildFirecrackerRootfs(t)
 
 	port := portCounter.Add(2)
-	callerAddr := fmt.Sprintf("172.16.0.1:%d", port)
-	runtimeAddr := fmt.Sprintf("172.16.0.1:%d", port+1)
+	callerAddr := fmt.Sprintf("[%s]:%d", firecracker.IPv6Gateway, port)
+	runtimeAddr := fmt.Sprintf("[%s]:%d", firecracker.IPv6Gateway, port+1)
 
 	ctx := context.Background()
 
@@ -305,9 +319,7 @@ func TestFirecrackerHypervisorCrashRecovery(t *testing.T) {
 			VcpuCount:  1,
 			MemSizeMib: 512,
 			Network: &firecracker.NetworkConfig{
-				BridgeName:   bridgeName,
-				GuestIP:      guestIP,
-				GuestGateway: gateway,
+				BridgeName: bridgeName,
 			},
 		},
 	}
@@ -449,14 +461,12 @@ func TestFirecrackerProcessCrashRestoreFromCheckpoint(t *testing.T) {
 	require.NoError(t, err)
 	defer pool.Close()
 
-	// Build rootfs
-	guestIP := "172.16.0.4/16" // Different IP to avoid conflicts
-	gateway := "172.16.0.1"
-	rootfsPath := buildFirecrackerRootfs(t, guestIP, gateway)
+	// Build rootfs (IPv6 networking is configured at runtime)
+	rootfsPath := buildFirecrackerRootfs(t)
 
 	port := portCounter.Add(2)
-	callerAddr := fmt.Sprintf("172.16.0.1:%d", port)
-	runtimeAddr := fmt.Sprintf("172.16.0.1:%d", port+1)
+	callerAddr := fmt.Sprintf("[%s]:%d", firecracker.IPv6Gateway, port)
+	runtimeAddr := fmt.Sprintf("[%s]:%d", firecracker.IPv6Gateway, port+1)
 
 	ctx := context.Background()
 
@@ -491,9 +501,7 @@ func TestFirecrackerProcessCrashRestoreFromCheckpoint(t *testing.T) {
 			VcpuCount:  1,
 			MemSizeMib: 512,
 			Network: &firecracker.NetworkConfig{
-				BridgeName:   bridgeName,
-				GuestIP:      guestIP,
-				GuestGateway: gateway,
+				BridgeName: bridgeName,
 			},
 		},
 		RetryPolicy: &hypervisor.RetryPolicy{
@@ -645,14 +653,12 @@ func TestFirecrackerFullSystemCrashWhileRunning(t *testing.T) {
 	require.NoError(t, err)
 	defer pool.Close()
 
-	// Build rootfs
-	guestIP := "172.16.0.5/16" // Different IP to avoid conflicts
-	gateway := "172.16.0.1"
-	rootfsPath := buildFirecrackerRootfs(t, guestIP, gateway)
+	// Build rootfs (IPv6 networking is configured at runtime)
+	rootfsPath := buildFirecrackerRootfs(t)
 
 	port := portCounter.Add(2)
-	callerAddr := fmt.Sprintf("172.16.0.1:%d", port)
-	runtimeAddr := fmt.Sprintf("172.16.0.1:%d", port+1)
+	callerAddr := fmt.Sprintf("[%s]:%d", firecracker.IPv6Gateway, port)
+	runtimeAddr := fmt.Sprintf("[%s]:%d", firecracker.IPv6Gateway, port+1)
 
 	ctx := context.Background()
 
@@ -680,9 +686,7 @@ func TestFirecrackerFullSystemCrashWhileRunning(t *testing.T) {
 			VcpuCount:  1,
 			MemSizeMib: 512,
 			Network: &firecracker.NetworkConfig{
-				BridgeName:   bridgeName,
-				GuestIP:      guestIP,
-				GuestGateway: gateway,
+				BridgeName: bridgeName,
 			},
 		},
 	}
