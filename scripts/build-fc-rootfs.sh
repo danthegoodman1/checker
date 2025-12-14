@@ -94,7 +94,7 @@ fi
 if [ -n "$CHECKER_GUEST_IP" ] && [ -n "$CHECKER_GATEWAY" ] && ip link show eth0 >/dev/null 2>&1; then
     ip link set eth0 up
     ip -6 addr add "$CHECKER_GUEST_IP" dev eth0
-    ip -6 route add default via "$CHECKER_GATEWAY"
+    ip -6 route add default via "$CHECKER_GATEWAY" dev eth0
     echo "nameserver 2001:4860:4860::8888" > /etc/resolv.conf
     echo "nameserver 8.8.8.8" >> /etc/resolv.conf
     echo "Network configured: $CHECKER_GUEST_IP via $CHECKER_GATEWAY"
