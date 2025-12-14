@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -60,8 +61,22 @@ func getFirecrackerTestConfig(t *testing.T) (kernelPath, bridgeName string) {
 	// Verify bridge exists
 	cmd := exec.Command("ip", "link", "show", bridgeName)
 	if err := cmd.Run(); err != nil {
-		t.Skipf("Bridge %s not found. Set up with: sudo ip link add %s type bridge && sudo ip -6 addr add fdfc::1/16 dev %s && sudo ip link set %s up",
-			bridgeName, bridgeName, bridgeName, bridgeName)
+		t.Skipf("Bridge %s not found. Set up with:\n"+
+			"  sudo ip link add %s type bridge\n"+
+			"  sudo ip -6 addr add fdfc::1/16 dev %s\n"+
+			"  sudo ip link set %s up\n"+
+			"  echo 1 | sudo tee /proc/sys/net/ipv6/conf/all/forwarding\n"+
+			"  sudo ip6tables -t nat -A POSTROUTING -s fdfc::/16 ! -o %s -j MASQUERADE",
+			bridgeName, bridgeName, bridgeName, bridgeName, bridgeName)
+	}
+
+	// Verify bridge has IPv6 address fdfc::1
+	cmd = exec.Command("ip", "-6", "addr", "show", "dev", bridgeName)
+	output, err := cmd.Output()
+	if err != nil || !strings.Contains(string(output), "fdfc::1") {
+		t.Skipf("Bridge %s does not have IPv6 address fdfc::1. Set up with:\n"+
+			"  sudo ip -6 addr add fdfc::1/16 dev %s",
+			bridgeName, bridgeName)
 	}
 
 	return kernelPath, bridgeName
