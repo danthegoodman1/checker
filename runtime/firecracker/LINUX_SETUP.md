@@ -75,8 +75,9 @@ Firecracker VMs use TAP devices attached to a host bridge for networking. This s
 
 ```bash
 # Create bridge
+# Using /16 allows up to ~65,000 concurrent VMs (vs 253 with /24)
 sudo ip link add fcbr0 type bridge
-sudo ip addr add 172.16.0.1/24 dev fcbr0
+sudo ip addr add 172.16.0.1/16 dev fcbr0
 sudo ip link set fcbr0 up
 
 # Enable IP forwarding
@@ -90,7 +91,7 @@ echo "net.ipv4.ip_forward = 1" | sudo tee -a /etc/sysctl.conf
 
 ```bash
 # Enable masquerading for the Firecracker network
-sudo iptables -t nat -A POSTROUTING -s 172.16.0.0/24 ! -o fcbr0 -j MASQUERADE
+sudo iptables -t nat -A POSTROUTING -s 172.16.0.0/16 ! -o fcbr0 -j MASQUERADE
 
 # Allow forwarding to/from the bridge
 sudo iptables -A FORWARD -i fcbr0 -j ACCEPT
@@ -160,7 +161,7 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # Configure networking (if eth0 exists)
 if ip link show eth0 &>/dev/null; then
     ip link set eth0 up
-    ip addr add 172.16.0.2/24 dev eth0
+    ip addr add 172.16.0.2/16 dev eth0
     ip route add default via 172.16.0.1
     echo "nameserver 8.8.8.8" > /etc/resolv.conf
 fi
@@ -180,7 +181,7 @@ reboot -f
 | Field | Required | Description | Example |
 |-------|----------|-------------|---------|
 | `bridge_name` | Yes | Host bridge to attach TAP device | `"fcbr0"` |
-| `guest_ip` | Yes | IP address for guest (CIDR notation) | `"172.16.0.2/24"` |
+| `guest_ip` | Yes | IP address for guest (CIDR notation) | `"172.16.0.2/16"` |
 | `guest_gateway` | Yes | Default gateway for guest | `"172.16.0.1"` |
 | `guest_mac` | No | MAC address (auto-generated if empty) | `"AA:BB:CC:DD:EE:FF"` |
 
@@ -194,7 +195,7 @@ reboot -f
     "mem_size_mib": 512,
     "network": {
         "bridge_name": "fcbr0",
-        "guest_ip": "172.16.0.2/24",
+        "guest_ip": "172.16.0.2/16",
         "guest_gateway": "172.16.0.1"
     }
 }

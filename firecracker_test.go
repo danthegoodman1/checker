@@ -29,10 +29,10 @@ import (
 //
 // Before running tests, set up the network bridge:
 //   sudo ip link add fcbr0 type bridge
-//   sudo ip addr add 172.16.0.1/24 dev fcbr0
+//   sudo ip addr add 172.16.0.1/16 dev fcbr0
 //   sudo ip link set fcbr0 up
 //   echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
-//   sudo iptables -t nat -A POSTROUTING -s 172.16.0.0/24 ! -o fcbr0 -j MASQUERADE
+//   sudo iptables -t nat -A POSTROUTING -s 172.16.0.0/16 ! -o fcbr0 -j MASQUERADE
 //
 // Run with: FC_KERNEL_PATH=/path/to/vmlinux PG_DSN=postgres://... go test -v -run TestFirecracker
 
@@ -60,7 +60,7 @@ func getFirecrackerTestConfig(t *testing.T) (kernelPath, bridgeName string) {
 	// Verify bridge exists
 	cmd := exec.Command("ip", "link", "show", bridgeName)
 	if err := cmd.Run(); err != nil {
-		t.Skipf("Bridge %s not found. Set up with: sudo ip link add %s type bridge && sudo ip addr add 172.16.0.1/24 dev %s && sudo ip link set %s up",
+		t.Skipf("Bridge %s not found. Set up with: sudo ip link add %s type bridge && sudo ip addr add 172.16.0.1/16 dev %s && sudo ip link set %s up",
 			bridgeName, bridgeName, bridgeName, bridgeName)
 	}
 
@@ -118,7 +118,7 @@ func TestFirecrackerHypervisorIntegration(t *testing.T) {
 	defer pool.Close()
 
 	// Build rootfs with networking configured
-	guestIP := "172.16.0.2/24"
+	guestIP := "172.16.0.2/16"
 	gateway := "172.16.0.1"
 	rootfsPath := buildFirecrackerRootfs(t, guestIP, gateway)
 
@@ -271,7 +271,7 @@ func TestFirecrackerHypervisorCrashRecovery(t *testing.T) {
 	defer pool.Close()
 
 	// Build rootfs
-	guestIP := "172.16.0.3/24" // Different IP to avoid conflicts
+	guestIP := "172.16.0.3/16" // Different IP to avoid conflicts
 	gateway := "172.16.0.1"
 	rootfsPath := buildFirecrackerRootfs(t, guestIP, gateway)
 
@@ -450,7 +450,7 @@ func TestFirecrackerProcessCrashRestoreFromCheckpoint(t *testing.T) {
 	defer pool.Close()
 
 	// Build rootfs
-	guestIP := "172.16.0.4/24" // Different IP to avoid conflicts
+	guestIP := "172.16.0.4/16" // Different IP to avoid conflicts
 	gateway := "172.16.0.1"
 	rootfsPath := buildFirecrackerRootfs(t, guestIP, gateway)
 
@@ -646,7 +646,7 @@ func TestFirecrackerFullSystemCrashWhileRunning(t *testing.T) {
 	defer pool.Close()
 
 	// Build rootfs
-	guestIP := "172.16.0.5/24" // Different IP to avoid conflicts
+	guestIP := "172.16.0.5/16" // Different IP to avoid conflicts
 	gateway := "172.16.0.1"
 	rootfsPath := buildFirecrackerRootfs(t, guestIP, gateway)
 

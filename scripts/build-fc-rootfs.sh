@@ -6,14 +6,14 @@
 # Arguments:
 #   dockerfile_path   - Path to the Dockerfile (e.g., demo/Dockerfile.checkpoint_restore)
 #   output_rootfs     - Where to write the ext4 rootfs (e.g., /tmp/rootfs.ext4)
-#   network_config    - Optional: "guest_ip,gateway" (e.g., "172.16.0.2/24,172.16.0.1")
+#   network_config    - Optional: "guest_ip,gateway" (e.g., "172.16.0.2/16,172.16.0.1")
 #                       If provided, the init script will configure networking.
 #
 # Dependencies: buildah, skopeo, umoci, e2fsprogs (mkfs.ext4), jq
 #
 # Example:
 #   ./scripts/build-fc-rootfs.sh demo/Dockerfile.checkpoint_restore /tmp/test.ext4
-#   ./scripts/build-fc-rootfs.sh demo/Dockerfile.checkpoint_restore /tmp/test.ext4 "172.16.0.2/24,172.16.0.1"
+#   ./scripts/build-fc-rootfs.sh demo/Dockerfile.checkpoint_restore /tmp/test.ext4 "172.16.0.2/16,172.16.0.1"
 
 set -euo pipefail
 

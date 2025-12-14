@@ -17,7 +17,7 @@ type NetworkConfig struct {
 	BridgeName string `json:"bridge_name" validate:"required"`
 
 	// GuestIP is the IP address for the guest VM's eth0 interface.
-	// Required. Must include CIDR notation. Example: "172.16.0.2/24"
+	// Required. Must include CIDR notation. Example: "172.16.0.2/16"
 	GuestIP string `json:"guest_ip" validate:"required"`
 
 	// GuestGateway is the default gateway for the guest VM.
