@@ -24,7 +24,6 @@ const (
 // where XXXX segments are derived from a SHA-256 hash of the execution ID.
 // This provides a deterministic mapping from any execution ID string to an IP.
 func ExecutionIDToIPv6(executionID string) string {
-	// Hash the execution ID to get consistent bytes regardless of format
 	hash := sha256.Sum256([]byte(executionID))
 
 	// fdfc:XXXX:XXXX:XXXX:XXXX:XXXX:XXXX:XXXX
@@ -34,7 +33,6 @@ func ExecutionIDToIPv6(executionID string) string {
 		hash[8], hash[9], hash[10], hash[11], hash[12], hash[13])
 }
 
-// ExecutionIDToIPv6WithCIDR returns the IPv6 address with CIDR notation.
 func ExecutionIDToIPv6WithCIDR(executionID string) string {
 	return fmt.Sprintf("%s/%d", ExecutionIDToIPv6(executionID), IPv6PrefixLen)
 }
