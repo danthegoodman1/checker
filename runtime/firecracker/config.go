@@ -14,15 +14,8 @@ var validate = validator.New()
 // Uses ULA (Unique Local Address) prefix fdfc::/16.
 // Guest IPs are derived from execution IDs, giving virtually unlimited unique addresses.
 const (
-	// IPv6Prefix is the network prefix for Firecracker VMs.
-	// Using fdfc::/16 gives us 112 bits for host addressing.
-	IPv6Prefix = "fdfc::/16"
-
-	// IPv6Gateway is the gateway address for Firecracker VMs.
-	// This is the bridge IP that the hypervisor listens on.
-	IPv6Gateway = "fdfc::1"
-
-	// IPv6PrefixLen is the prefix length for guest addresses.
+	IPv6Prefix    = "fdfc::/16"
+	IPv6Gateway   = "fdfc::1"
 	IPv6PrefixLen = 16
 )
 
