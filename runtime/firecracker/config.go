@@ -70,16 +70,6 @@ func (n *NetworkConfig) Validate() error {
 	return nil
 }
 
-// GuestIPv6 returns the guest IPv6 address derived from the execution ID.
-func (n *NetworkConfig) GuestIPv6(executionID string) string {
-	return ExecutionIDToIPv6WithCIDR(executionID)
-}
-
-// GatewayIPv6 returns the gateway IPv6 address.
-func (n *NetworkConfig) GatewayIPv6() string {
-	return IPv6Gateway
-}
-
 // GenerateMAC generates a random MAC address for the guest VM.
 // Uses locally administered unicast address format (02:xx:xx:xx:xx:xx).
 func GenerateMAC() (string, error) {
