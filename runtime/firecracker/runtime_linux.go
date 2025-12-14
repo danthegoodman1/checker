@@ -511,11 +511,7 @@ func (r *Runtime) Start(ctx context.Context, opts runtime.StartOptions) (runtime
 	env["CHECKER_JOB_ID"] = opts.ExecutionID
 
 	// Add IPv6 network configuration derived from execution ID
-	guestIP, err := ExecutionIDToIPv6WithCIDR(opts.ExecutionID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate guest IPv6: %w", err)
-	}
-	env["CHECKER_GUEST_IP"] = guestIP
+	env["CHECKER_GUEST_IP"] = ExecutionIDToIPv6WithCIDR(opts.ExecutionID)
 	env["CHECKER_GATEWAY"] = IPv6Gateway
 
 	if err := injectEnvVars(workRootfs, env); err != nil {

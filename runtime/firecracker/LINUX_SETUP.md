@@ -227,8 +227,8 @@ The following environment variables are injected into `/etc/checker.env` at runt
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `CHECKER_API_URL` | Hypervisor API URL | `http://[fdfc::1]:8080` |
-| `CHECKER_JOB_ID` | Job/Execution ID | `550e8400-e29b-41d4-a716-446655440000` |
-| `CHECKER_GUEST_IP` | Guest IPv6 with CIDR | `fdfc:550e:8400:e29b:41d4:a716:4466:5544/16` |
+| `CHECKER_JOB_ID` | Job/Execution ID | `job-1234567890-1` |
+| `CHECKER_GUEST_IP` | Guest IPv6 with CIDR (derived from job ID hash) | `fdfc:a1b2:c3d4:e5f6:7890:abcd:ef01:2345/16` |
 | `CHECKER_GATEWAY` | Gateway IPv6 | `fdfc::1` |
 
 ## Running Tests

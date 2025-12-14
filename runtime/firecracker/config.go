@@ -2,10 +2,10 @@ package firecracker
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"fmt"
 
 	"github.com/go-playground/validator/v10"
-	"github.com/google/uuid"
 )
 
 var validate = validator.New()
@@ -26,31 +26,24 @@ const (
 	IPv6PrefixLen = 16
 )
 
-// ExecutionIDToIPv6 derives a unique IPv6 address from an execution ID (UUID).
+// ExecutionIDToIPv6 derives a unique IPv6 address from an execution ID.
 // The address format is: fdfc:XXXX:XXXX:XXXX:XXXX:XXXX:XXXX:XXXX
-// where XXXX segments are derived from the first 14 bytes of the UUID.
-// This provides a deterministic, collision-free mapping from execution ID to IP.
-func ExecutionIDToIPv6(executionID string) (string, error) {
-	id, err := uuid.Parse(executionID)
-	if err != nil {
-		return "", fmt.Errorf("invalid execution ID (expected UUID): %w", err)
-	}
+// where XXXX segments are derived from a SHA-256 hash of the execution ID.
+// This provides a deterministic mapping from any execution ID string to an IP.
+func ExecutionIDToIPv6(executionID string) string {
+	// Hash the execution ID to get consistent bytes regardless of format
+	hash := sha256.Sum256([]byte(executionID))
 
-	b := id[:]
 	// fdfc:XXXX:XXXX:XXXX:XXXX:XXXX:XXXX:XXXX
-	// Use first 14 bytes of UUID (112 bits) after the fdfc prefix (16 bits)
+	// Use first 14 bytes of hash (112 bits) after the fdfc prefix (16 bits)
 	return fmt.Sprintf("fdfc:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x",
-		b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-		b[8], b[9], b[10], b[11], b[12], b[13]), nil
+		hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7],
+		hash[8], hash[9], hash[10], hash[11], hash[12], hash[13])
 }
 
 // ExecutionIDToIPv6WithCIDR returns the IPv6 address with CIDR notation.
-func ExecutionIDToIPv6WithCIDR(executionID string) (string, error) {
-	ip, err := ExecutionIDToIPv6(executionID)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%s/%d", ip, IPv6PrefixLen), nil
+func ExecutionIDToIPv6WithCIDR(executionID string) string {
+	return fmt.Sprintf("%s/%d", ExecutionIDToIPv6(executionID), IPv6PrefixLen)
 }
 
 // NetworkConfig configures TAP networking for the Firecracker VM.
@@ -78,7 +71,7 @@ func (n *NetworkConfig) Validate() error {
 }
 
 // GuestIPv6 returns the guest IPv6 address derived from the execution ID.
-func (n *NetworkConfig) GuestIPv6(executionID string) (string, error) {
+func (n *NetworkConfig) GuestIPv6(executionID string) string {
 	return ExecutionIDToIPv6WithCIDR(executionID)
 }
 
