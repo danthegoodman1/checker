@@ -80,14 +80,25 @@ Firecracker VMs use TAP devices attached to a host bridge for networking. This s
 ```bash
 # Create bridge with IPv6
 sudo ip link add fcbr0 type bridge
-sudo ip -6 addr add fdfc::1/16 dev fcbr0
 sudo ip link set fcbr0 up
+
+# Disable DAD (Duplicate Address Detection) to avoid "tentative" address state
+# This is needed because the bridge has no carrier until a TAP device is attached
+sudo sysctl -w net.ipv6.conf.fcbr0.accept_dad=0
+sudo sysctl -w net.ipv6.conf.fcbr0.dad_transmits=0
+
+# Add IPv6 address
+sudo ip -6 addr add fdfc::1/16 dev fcbr0
 
 # Enable IPv6 forwarding
 echo 1 | sudo tee /proc/sys/net/ipv6/conf/all/forwarding
 
-# Make IPv6 forwarding persistent (add to /etc/sysctl.conf)
-echo "net.ipv6.conf.all.forwarding = 1" | sudo tee -a /etc/sysctl.conf
+# Make settings persistent (add to /etc/sysctl.conf)
+cat << 'EOF' | sudo tee -a /etc/sysctl.conf
+net.ipv6.conf.all.forwarding = 1
+net.ipv6.conf.fcbr0.accept_dad = 0
+net.ipv6.conf.fcbr0.dad_transmits = 0
+EOF
 ```
 
 ### 2. Configure NAT for Internet Access

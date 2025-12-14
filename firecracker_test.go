@@ -30,10 +30,14 @@ import (
 //
 // Before running tests, set up the network bridge (IPv6):
 //   sudo ip link add fcbr0 type bridge
-//   sudo ip -6 addr add fdfc::1/16 dev fcbr0
 //   sudo ip link set fcbr0 up
+//   sudo sysctl -w net.ipv6.conf.fcbr0.accept_dad=0
+//   sudo sysctl -w net.ipv6.conf.fcbr0.dad_transmits=0
+//   sudo ip -6 addr add fdfc::1/16 dev fcbr0
 //   echo 1 | sudo tee /proc/sys/net/ipv6/conf/all/forwarding
 //   sudo ip6tables -t nat -A POSTROUTING -s fdfc::/16 ! -o fcbr0 -j MASQUERADE
+//   sudo ip6tables -A FORWARD -i fcbr0 -j ACCEPT
+//   sudo ip6tables -A FORWARD -o fcbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT
 //
 // Run with: FC_KERNEL_PATH=/path/to/vmlinux PG_DSN=postgres://... go test -v -run TestFirecracker
 
