@@ -5,28 +5,86 @@ import (
 	"fmt"
 
 	"github.com/go-playground/validator/v10"
+	"github.com/google/uuid"
 )
 
 var validate = validator.New()
 
+// IPv6 network constants for Firecracker VMs.
+// Uses ULA (Unique Local Address) prefix fdfc::/16.
+// Guest IPs are derived from execution IDs, giving virtually unlimited unique addresses.
+const (
+	// IPv6Prefix is the network prefix for Firecracker VMs.
+	// Using fdfc::/16 gives us 112 bits for host addressing.
+	IPv6Prefix = "fdfc::/16"
+
+	// IPv6Gateway is the gateway address for Firecracker VMs.
+	// This is the bridge IP that the hypervisor listens on.
+	IPv6Gateway = "fdfc::1"
+
+	// IPv6PrefixLen is the prefix length for guest addresses.
+	IPv6PrefixLen = 16
+)
+
+// ExecutionIDToIPv6 derives a unique IPv6 address from an execution ID (UUID).
+// The address format is: fdfc:XXXX:XXXX:XXXX:XXXX:XXXX:XXXX:XXXX
+// where XXXX segments are derived from the first 14 bytes of the UUID.
+// This provides a deterministic, collision-free mapping from execution ID to IP.
+func ExecutionIDToIPv6(executionID string) (string, error) {
+	id, err := uuid.Parse(executionID)
+	if err != nil {
+		return "", fmt.Errorf("invalid execution ID (expected UUID): %w", err)
+	}
+
+	b := id[:]
+	// fdfc:XXXX:XXXX:XXXX:XXXX:XXXX:XXXX:XXXX
+	// Use first 14 bytes of UUID (112 bits) after the fdfc prefix (16 bits)
+	return fmt.Sprintf("fdfc:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x",
+		b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+		b[8], b[9], b[10], b[11], b[12], b[13]), nil
+}
+
+// ExecutionIDToIPv6WithCIDR returns the IPv6 address with CIDR notation.
+func ExecutionIDToIPv6WithCIDR(executionID string) (string, error) {
+	ip, err := ExecutionIDToIPv6(executionID)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s/%d", ip, IPv6PrefixLen), nil
+}
+
 // NetworkConfig configures TAP networking for the Firecracker VM.
 // The bridge must be pre-configured on the host (see LINUX_SETUP.md).
+//
+// Uses IPv6-only networking with addresses auto-derived from execution IDs.
+// This provides virtually unlimited unique addresses with no IP allocation needed.
+// Gateway is always fdfc::1, guest IPs are fdfc::<execution_id>.
 type NetworkConfig struct {
 	// BridgeName is the name of the host bridge to attach the TAP device to.
-	// Required for networking. Example: "fcbr0"
+	// Required. Example: "fcbr0"
 	BridgeName string `json:"bridge_name" validate:"required"`
-
-	// GuestIP is the IP address for the guest VM's eth0 interface.
-	// Required. Must include CIDR notation. Example: "172.16.0.2/16"
-	GuestIP string `json:"guest_ip" validate:"required"`
-
-	// GuestGateway is the default gateway for the guest VM.
-	// Required. Example: "172.16.0.1"
-	GuestGateway string `json:"guest_gateway" validate:"required"`
 
 	// GuestMAC is the MAC address for the guest VM's eth0 interface.
 	// Optional. If empty, a random MAC is generated.
 	GuestMAC string `json:"guest_mac"`
+}
+
+// Validate checks that the network config has all required fields.
+func (n *NetworkConfig) Validate() error {
+	if n.BridgeName == "" {
+		return fmt.Errorf("bridge_name is required")
+	}
+	return nil
+}
+
+// GuestIPv6 returns the guest IPv6 address derived from the execution ID.
+func (n *NetworkConfig) GuestIPv6(executionID string) (string, error) {
+	return ExecutionIDToIPv6WithCIDR(executionID)
+}
+
+// GatewayIPv6 returns the gateway IPv6 address.
+func (n *NetworkConfig) GatewayIPv6() string {
+	return IPv6Gateway
 }
 
 // GenerateMAC generates a random MAC address for the guest VM.
@@ -76,7 +134,7 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if c.Network != nil {
-		if err := validate.Struct(c.Network); err != nil {
+		if err := c.Network.Validate(); err != nil {
 			return fmt.Errorf("invalid network config: %w", err)
 		}
 	}
