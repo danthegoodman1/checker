@@ -11,4 +11,4 @@ docker run --rm --platform linux/amd64 -v "$SCRIPT_DIR":/src -w /src rust:alpine
 
 echo "Binary built at: target/release/fc-trigger"
 ls -lh target/release/fc-trigger
-file target/release/fc-trigger
+file target/release/fc-trigger 2>/dev/null || true
