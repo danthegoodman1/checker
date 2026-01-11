@@ -23,8 +23,10 @@ import (
 )
 
 // Environment variables for Cloud Hypervisor tests:
-// - CHV_KERNEL_PATH: Path to the kernel image (required)
-//   Download with: curl -fLo vmlinux-5.10.bin "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/x86_64/vmlinux-5.10.223"
+// - CHV_FIRMWARE_PATH: Path to hypervisor-fw firmware (required)
+//   Download from Cloud Hypervisor releases:
+//   curl -fLo hypervisor-fw "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v50.0/hypervisor-fw"
+//   The firmware includes a built-in kernel with virtio drivers.
 // - CHV_BRIDGE_NAME: Name of the bridge for TAP networking (default: chvbr0)
 // - PG_DSN: PostgreSQL connection string (required for hypervisor tests)
 //
@@ -42,18 +44,19 @@ import (
 //   sudo ip6tables -A FORWARD -i chvbr0 -j ACCEPT
 //   sudo ip6tables -A FORWARD -o chvbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT
 //
-// Run with: CHV_KERNEL_PATH=/path/to/vmlinux PG_DSN=postgres://... go test -v -run TestCloudHypervisor
+// Run with: CHV_FIRMWARE_PATH=/path/to/hypervisor-fw PG_DSN=postgres://... go test -v -run TestCloudHypervisor
 
-func getCloudHypervisorTestConfig(t *testing.T) (kernelPath, bridgeName string) {
+func getCloudHypervisorTestConfig(t *testing.T) (firmwarePath, bridgeName string) {
 	t.Helper()
 
 	if goruntime.GOOS != "linux" {
 		t.Skip("Cloud Hypervisor requires Linux")
 	}
 
-	kernelPath = os.Getenv("CHV_KERNEL_PATH")
-	if kernelPath == "" {
-		t.Skip("CHV_KERNEL_PATH not set. Download kernel with: curl -fLo vmlinux-5.10.bin 'https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/x86_64/vmlinux-5.10.223'")
+	firmwarePath = os.Getenv("CHV_FIRMWARE_PATH")
+	if firmwarePath == "" {
+		t.Skip("CHV_FIRMWARE_PATH not set. Download hypervisor-fw from Cloud Hypervisor releases:\n" +
+			"curl -fLo hypervisor-fw 'https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v50.0/hypervisor-fw'")
 	}
 
 	if _, err := exec.LookPath("cloud-hypervisor"); err != nil {
@@ -92,7 +95,7 @@ func getCloudHypervisorTestConfig(t *testing.T) (kernelPath, bridgeName string) 
 			bridgeName, bridgeName, bridgeName, bridgeName)
 	}
 
-	return kernelPath, bridgeName
+	return firmwarePath, bridgeName
 }
 
 // buildCloudHypervisorRootfs builds a rootfs raw image from the checkpoint_restore Dockerfile.
@@ -131,7 +134,7 @@ func buildCloudHypervisorRootfs(t *testing.T) string {
 // TestCloudHypervisorHypervisorIntegration tests the full hypervisor flow with Cloud Hypervisor:
 // spawn job -> checkpoint -> restore -> complete
 func TestCloudHypervisorHypervisorIntegration(t *testing.T) {
-	kernelPath, bridgeName := getCloudHypervisorTestConfig(t)
+	firmwarePath, bridgeName := getCloudHypervisorTestConfig(t)
 
 	if utils.PG_DSN == "" {
 		t.Skip("PG_DSN environment variable not set")
@@ -181,10 +184,10 @@ func TestCloudHypervisorHypervisorIntegration(t *testing.T) {
 		Version:     "1.0.0",
 		RuntimeType: runtime.RuntimeTypeCloudHypervisor,
 		Config: &cloudhv.Config{
-			KernelPath: kernelPath,
-			RootfsPath: rootfsPath,
-			VcpuCount:  1,
-			MemSizeMib: 512,
+			FirmwarePath: firmwarePath,
+			RootfsPath:   rootfsPath,
+			VcpuCount:    1,
+			MemSizeMib:   512,
 			Network: &cloudhv.NetworkConfig{
 				BridgeName: bridgeName,
 			},
@@ -281,7 +284,7 @@ func TestCloudHypervisorHypervisorIntegration(t *testing.T) {
 
 // TestCloudHypervisorHypervisorCrashRecovery tests that Cloud Hypervisor jobs can be recovered after hypervisor crash.
 func TestCloudHypervisorHypervisorCrashRecovery(t *testing.T) {
-	kernelPath, bridgeName := getCloudHypervisorTestConfig(t)
+	firmwarePath, bridgeName := getCloudHypervisorTestConfig(t)
 
 	if utils.PG_DSN == "" {
 		t.Skip("PG_DSN environment variable not set")
@@ -323,10 +326,10 @@ func TestCloudHypervisorHypervisorCrashRecovery(t *testing.T) {
 		Version:     "1.0.0",
 		RuntimeType: runtime.RuntimeTypeCloudHypervisor,
 		Config: &cloudhv.Config{
-			KernelPath: kernelPath,
-			RootfsPath: rootfsPath,
-			VcpuCount:  1,
-			MemSizeMib: 512,
+			FirmwarePath: firmwarePath,
+			RootfsPath:   rootfsPath,
+			VcpuCount:    1,
+			MemSizeMib:   512,
 			Network: &cloudhv.NetworkConfig{
 				BridgeName: bridgeName,
 			},
@@ -456,7 +459,7 @@ func TestCloudHypervisorHypervisorCrashRecovery(t *testing.T) {
 // 5. Hypervisor detects failure and retries from checkpoint
 // 6. Verifies the job completes successfully with correct output
 func TestCloudHypervisorProcessCrashRestoreFromCheckpoint(t *testing.T) {
-	kernelPath, bridgeName := getCloudHypervisorTestConfig(t)
+	firmwarePath, bridgeName := getCloudHypervisorTestConfig(t)
 
 	if utils.PG_DSN == "" {
 		t.Skip("PG_DSN environment variable not set")
@@ -505,10 +508,10 @@ func TestCloudHypervisorProcessCrashRestoreFromCheckpoint(t *testing.T) {
 		Version:     "1.0.0",
 		RuntimeType: runtime.RuntimeTypeCloudHypervisor,
 		Config: &cloudhv.Config{
-			KernelPath: kernelPath,
-			RootfsPath: rootfsPath,
-			VcpuCount:  1,
-			MemSizeMib: 512,
+			FirmwarePath: firmwarePath,
+			RootfsPath:   rootfsPath,
+			VcpuCount:    1,
+			MemSizeMib:   512,
 			Network: &cloudhv.NetworkConfig{
 				BridgeName: bridgeName,
 			},
@@ -648,7 +651,7 @@ func TestCloudHypervisorProcessCrashRestoreFromCheckpoint(t *testing.T) {
 // 4. Starts a NEW hypervisor and recovers from checkpoint
 // 5. Verifies the job completes successfully
 func TestCloudHypervisorFullSystemCrashWhileRunning(t *testing.T) {
-	kernelPath, bridgeName := getCloudHypervisorTestConfig(t)
+	firmwarePath, bridgeName := getCloudHypervisorTestConfig(t)
 
 	if utils.PG_DSN == "" {
 		t.Skip("PG_DSN environment variable not set")
@@ -690,10 +693,10 @@ func TestCloudHypervisorFullSystemCrashWhileRunning(t *testing.T) {
 		Version:     "1.0.0",
 		RuntimeType: runtime.RuntimeTypeCloudHypervisor,
 		Config: &cloudhv.Config{
-			KernelPath: kernelPath,
-			RootfsPath: rootfsPath,
-			VcpuCount:  1,
-			MemSizeMib: 512,
+			FirmwarePath: firmwarePath,
+			RootfsPath:   rootfsPath,
+			VcpuCount:    1,
+			MemSizeMib:   512,
 			Network: &cloudhv.NetworkConfig{
 				BridgeName: bridgeName,
 			},

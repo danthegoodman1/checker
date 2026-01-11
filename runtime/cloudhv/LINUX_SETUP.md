@@ -25,22 +25,24 @@ sudo chmod +x /usr/local/bin/cloud-hypervisor
 cloud-hypervisor --version
 ```
 
-### 3. Download Kernel
+### 3. Download Firmware (hypervisor-fw)
 
-Cloud Hypervisor supports both compressed (bzImage) and uncompressed (vmlinux) kernels:
+Cloud Hypervisor uses **hypervisor-fw**, a minimal UEFI-like firmware that includes
+a built-in Linux kernel with all virtio drivers (virtio-blk, virtio-net, etc.).
 
 ```bash
-# Download pre-built kernel (hypervisor-fw is also an option for UEFI boot)
-ARCH=$(uname -m)
-curl -fLo vmlinux-6.6 "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v44.0/hypervisor-fw"
+# Download hypervisor-fw from Cloud Hypervisor releases
+CHV_VERSION="v50.0"
+curl -fLo hypervisor-fw "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CHV_VERSION}/hypervisor-fw"
 
-# For better compatibility, use a standard Linux kernel:
-curl -fLo vmlinux-5.10.bin "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/x86_64/vmlinux-5.10.223"
-
-# Make it accessible (e.g., /opt/cloud-hypervisor/)
+# Make it accessible
 sudo mkdir -p /opt/cloud-hypervisor
-sudo mv vmlinux-5.10.bin /opt/cloud-hypervisor/
+sudo mv hypervisor-fw /opt/cloud-hypervisor/
+sudo chmod +x /opt/cloud-hypervisor/hypervisor-fw
 ```
+
+**Note**: Do NOT use the Firecracker kernel - it lacks virtio drivers.
+The hypervisor-fw firmware is the recommended approach as it includes everything needed.
 
 ### 4. Install Required Tools for Rootfs Building
 
@@ -224,7 +226,7 @@ Note: `guest_ip` and `guest_gateway` are automatically derived from the executio
 
 ```json
 {
-    "kernel_path": "/opt/cloud-hypervisor/vmlinux-5.10.bin",
+    "firmware_path": "/opt/cloud-hypervisor/hypervisor-fw",
     "rootfs_path": "/path/to/rootfs.raw",
     "vcpu_count": 2,
     "mem_size_mib": 512,

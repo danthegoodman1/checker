@@ -486,7 +486,7 @@ func (r *Runtime) Start(ctx context.Context, opts runtime.StartOptions) (runtime
 
 	r.logger.Debug().
 		Str("execution_id", opts.ExecutionID).
-		Str("kernel", cfg.KernelPath).
+		Str("firmware", cfg.FirmwarePath).
 		Str("rootfs", cfg.RootfsPath).
 		Msg("starting Cloud Hypervisor VM")
 
@@ -616,10 +616,10 @@ func (r *Runtime) startVM(ctx context.Context, executionID string, cfg *Config, 
 
 	// Create VM config for Cloud Hypervisor
 	// See: https://github.com/cloud-hypervisor/cloud-hypervisor/blob/main/docs/api.md
+	// Using firmware (hypervisor-fw) which includes a built-in kernel with virtio drivers
 	vmConfig := map[string]any{
 		"payload": map[string]string{
-			"kernel":  cfg.KernelPath,
-			"cmdline": cfg.Cmdline,
+			"firmware": cfg.FirmwarePath,
 		},
 		"disks": []map[string]any{
 			{
