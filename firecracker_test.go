@@ -31,6 +31,9 @@ import (
 // Before running tests, set up the network bridge (IPv6):
 //   sudo ip link add fcbr0 type bridge
 //   sudo ip link set fcbr0 up
+//   sudo ip link set fcbr0 type bridge stp_state 0
+//   sudo ip link set fcbr0 type bridge forward_delay 0
+//   # Crucial: Disable DAD *before* adding the IPv6 address
 //   sudo sysctl -w net.ipv6.conf.fcbr0.accept_dad=0
 //   sudo sysctl -w net.ipv6.conf.fcbr0.dad_transmits=0
 //   sudo ip -6 addr add fdfc::1/16 dev fcbr0
@@ -67,11 +70,17 @@ func getFirecrackerTestConfig(t *testing.T) (kernelPath, bridgeName string) {
 	if err := cmd.Run(); err != nil {
 		t.Skipf("Bridge %s not found. Set up with:\n"+
 			"  sudo ip link add %s type bridge\n"+
-			"  sudo ip -6 addr add fdfc::1/16 dev %s\n"+
 			"  sudo ip link set %s up\n"+
+			"  sudo ip link set %s type bridge stp_state 0\n"+
+			"  sudo ip link set %s type bridge forward_delay 0\n"+
+			"  sudo sysctl -w net.ipv6.conf.%s.accept_dad=0\n"+
+			"  sudo sysctl -w net.ipv6.conf.%s.dad_transmits=0\n"+
+			"  sudo ip -6 addr add fdfc::1/16 dev %s\n"+
 			"  echo 1 | sudo tee /proc/sys/net/ipv6/conf/all/forwarding\n"+
-			"  sudo ip6tables -t nat -A POSTROUTING -s fdfc::/16 ! -o %s -j MASQUERADE",
-			bridgeName, bridgeName, bridgeName, bridgeName, bridgeName)
+			"  sudo ip6tables -t nat -A POSTROUTING -s fdfc::/16 ! -o %s -j MASQUERADE\n"+
+			"  sudo ip6tables -A FORWARD -i %s -j ACCEPT\n"+
+			"  sudo ip6tables -A FORWARD -o %s -m state --state RELATED,ESTABLISHED -j ACCEPT",
+			bridgeName, bridgeName, bridgeName, bridgeName, bridgeName, bridgeName, bridgeName, bridgeName, bridgeName, bridgeName, bridgeName)
 	}
 
 	// Verify bridge has IPv6 address fdfc::1
@@ -79,7 +88,27 @@ func getFirecrackerTestConfig(t *testing.T) (kernelPath, bridgeName string) {
 	output, err := cmd.Output()
 	if err != nil || !strings.Contains(string(output), "fdfc::1") {
 		t.Skipf("Bridge %s does not have IPv6 address fdfc::1. Set up with:\n"+
+			"  sudo sysctl -w net.ipv6.conf.%s.accept_dad=0\n"+
+			"  sudo sysctl -w net.ipv6.conf.%s.dad_transmits=0\n"+
 			"  sudo ip -6 addr add fdfc::1/16 dev %s",
+			bridgeName, bridgeName, bridgeName, bridgeName)
+	}
+
+	// Verify bridge STP state is 0
+	cmd = exec.Command("cat", fmt.Sprintf("/sys/class/net/%s/bridge/stp_state", bridgeName))
+	output, err = cmd.Output()
+	if err != nil || strings.TrimSpace(string(output)) != "0" {
+		t.Skipf("Bridge %s STP state is not 0. Set up with:\n"+
+			"  sudo ip link set %s type bridge stp_state 0",
+			bridgeName, bridgeName)
+	}
+
+	// Verify bridge forward_delay is 0
+	cmd = exec.Command("cat", fmt.Sprintf("/sys/class/net/%s/bridge/forward_delay", bridgeName))
+	output, err = cmd.Output()
+	if err != nil || strings.TrimSpace(string(output)) != "0" {
+		t.Skipf("Bridge %s forward_delay is not 0. Set up with:\n"+
+			"  sudo ip link set %s type bridge forward_delay 0",
 			bridgeName, bridgeName)
 	}
 
