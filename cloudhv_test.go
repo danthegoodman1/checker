@@ -74,6 +74,8 @@ func getCloudHypervisorTestConfig(t *testing.T) (kernelPath, bridgeName string) 
 		t.Skipf("Bridge %s not found. Set up with:\n"+
 			"  sudo ip link add %s type bridge\n"+
 			"  sudo ip link set %s up\n"+
+			"  sudo ip link set %s type bridge stp_state 0\n"+
+			"  sudo ip link set %s type bridge forward_delay 0\n"+
 			"  sudo sysctl -w net.ipv6.conf.%s.accept_dad=0\n"+
 			"  sudo sysctl -w net.ipv6.conf.%s.dad_transmits=0\n"+
 			"  sudo ip -6 addr add fdcd::1/16 dev %s\n"+
@@ -81,7 +83,7 @@ func getCloudHypervisorTestConfig(t *testing.T) (kernelPath, bridgeName string) 
 			"  sudo ip6tables -t nat -A POSTROUTING -s fdcd::/16 ! -o %s -j MASQUERADE\n"+
 			"  sudo ip6tables -A FORWARD -i %s -j ACCEPT\n"+
 			"  sudo ip6tables -A FORWARD -o %s -m state --state RELATED,ESTABLISHED -j ACCEPT",
-			bridgeName, bridgeName, bridgeName, bridgeName, bridgeName, bridgeName, bridgeName, bridgeName, bridgeName)
+			bridgeName, bridgeName, bridgeName, bridgeName, bridgeName, bridgeName, bridgeName, bridgeName, bridgeName, bridgeName, bridgeName)
 	}
 
 	// Verify bridge has IPv6 address fdcd::1

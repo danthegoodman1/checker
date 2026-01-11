@@ -91,6 +91,11 @@ Note: Uses `fdcd::` prefix to avoid conflicts with Firecracker's `fdfc::` prefix
 sudo ip link add chvbr0 type bridge
 sudo ip link set chvbr0 up
 
+# CRITICAL: Disable STP and set forwarding delay to 0
+# Without this, the bridge has a 15-second delay before forwarding traffic
+sudo ip link set chvbr0 type bridge stp_state 0
+sudo ip link set chvbr0 type bridge forward_delay 0
+
 # Disable DAD (Duplicate Address Detection) to avoid "tentative" address state
 # This is needed because the bridge has no carrier until a TAP device is attached
 sudo sysctl -w net.ipv6.conf.chvbr0.accept_dad=0
