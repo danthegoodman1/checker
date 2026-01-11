@@ -7,6 +7,10 @@
 #   dockerfile_path   - Path to the Dockerfile (e.g., demo/Dockerfile.checkpoint_restore)
 #   output_rootfs     - Where to write the raw rootfs (e.g., /tmp/rootfs.raw)
 #
+# Environment Variables:
+#   CHV_KERNEL_PATH   - Path to the kernel (used to find matching modules)
+#                       Defaults to /boot/vmlinuz-$(uname -r)
+#
 # Network Configuration:
 #   IPv6 networking is configured at runtime from environment variables injected
 #   by the Cloud Hypervisor runtime into /etc/checker.env:
@@ -16,7 +20,7 @@
 # Dependencies: buildah, skopeo, umoci, e2fsprogs (mkfs.ext4), jq
 #
 # Example:
-#   ./scripts/build-chv-rootfs.sh demo/Dockerfile.checkpoint_restore /tmp/test.raw
+#   CHV_KERNEL_PATH=/boot/vmlinuz-6.17.0-8-generic ./scripts/build-chv-rootfs.sh demo/Dockerfile.checkpoint_restore /tmp/test.raw
 
 set -euo pipefail
 
@@ -32,6 +36,18 @@ OUTPUT="${2:-}"
 for cmd in buildah skopeo umoci mkfs.ext4 jq; do
     command -v "$cmd" &>/dev/null || die "$cmd not found. Install with: apt-get install buildah skopeo umoci e2fsprogs jq"
 done
+
+# Determine kernel version for module copying
+KERNEL_PATH="${CHV_KERNEL_PATH:-/boot/vmlinuz-$(uname -r)}"
+# Extract version from kernel path (e.g., /boot/vmlinuz-6.17.0-8-generic -> 6.17.0-8-generic)
+KERNEL_VERSION=$(basename "$KERNEL_PATH" | sed 's/vmlinuz-//')
+MODULES_DIR="/lib/modules/$KERNEL_VERSION"
+
+if [[ ! -d "$MODULES_DIR" ]]; then
+    echo "Warning: Modules directory $MODULES_DIR not found"
+    echo "         Network may not work if virtio_net is a module"
+    MODULES_DIR=""
+fi
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"; buildah rm $(buildah containers -q 2>/dev/null) &>/dev/null || true' EXIT
@@ -66,6 +82,40 @@ FS="$WORK/bundle/rootfs"
 mkdir -p "$FS"/{dev,proc,sys,run,tmp}
 [[ ! -s "$FS/etc/resolv.conf" ]] && printf "nameserver 8.8.8.8\nnameserver 2001:4860:4860::8888\n" > "$FS/etc/resolv.conf"
 
+# Copy virtio network modules if available
+if [[ -n "$MODULES_DIR" ]]; then
+    echo "Copying kernel modules from $MODULES_DIR..."
+    mkdir -p "$FS/lib/modules/$KERNEL_VERSION"
+    
+    # Find and copy virtio_net and its dependencies
+    # We use modinfo to find dependencies, falling back to known modules
+    VIRTIO_NET_PATH=$(find "$MODULES_DIR" -name "virtio_net.ko*" 2>/dev/null | head -1)
+    if [[ -n "$VIRTIO_NET_PATH" ]]; then
+        # Copy virtio_net module
+        cp "$VIRTIO_NET_PATH" "$FS/lib/modules/$KERNEL_VERSION/"
+        echo "  Copied: $(basename "$VIRTIO_NET_PATH")"
+        
+        # Copy net_failover if it exists (optional dependency)
+        NET_FAILOVER_PATH=$(find "$MODULES_DIR" -name "net_failover.ko*" 2>/dev/null | head -1)
+        if [[ -n "$NET_FAILOVER_PATH" ]]; then
+            cp "$NET_FAILOVER_PATH" "$FS/lib/modules/$KERNEL_VERSION/"
+            echo "  Copied: $(basename "$NET_FAILOVER_PATH")"
+        fi
+        
+        # Copy failover module if it exists
+        FAILOVER_PATH=$(find "$MODULES_DIR" -name "failover.ko*" 2>/dev/null | head -1)
+        if [[ -n "$FAILOVER_PATH" ]]; then
+            cp "$FAILOVER_PATH" "$FS/lib/modules/$KERNEL_VERSION/"
+            echo "  Copied: $(basename "$FAILOVER_PATH")"
+        fi
+        
+        # Generate modules.dep for insmod ordering
+        echo "# Module dependencies" > "$FS/lib/modules/$KERNEL_VERSION/modules.dep"
+    else
+        echo "  Warning: virtio_net.ko not found (may be built-in)"
+    fi
+fi
+
 # Generate init from image's ENTRYPOINT/CMD
 echo "Creating /init script..."
 cat > "$FS/init" <<'INITEOF'
@@ -83,6 +133,60 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Seed random if hardware RNG is available
 [ -c /dev/hwrng ] && dd if=/dev/hwrng of=/dev/urandom bs=512 count=4 2>/dev/null
+
+# Load virtio_net module if available (needed for networking)
+# The module may be compressed (.ko.zst, .ko.xz, .ko.gz) or uncompressed (.ko)
+load_module() {
+    local name="$1"
+    local mod_path=""
+    
+    # Find module in /lib/modules
+    for ext in ko ko.zst ko.xz ko.gz; do
+        for kver in /lib/modules/*; do
+            if [ -f "$kver/$name.$ext" ]; then
+                mod_path="$kver/$name.$ext"
+                break 2
+            fi
+        done
+    done
+    
+    if [ -z "$mod_path" ]; then
+        return 1
+    fi
+    
+    # Decompress if needed and load
+    case "$mod_path" in
+        *.zst)
+            if command -v zstd >/dev/null 2>&1; then
+                zstd -d -c "$mod_path" > /tmp/mod.ko 2>/dev/null && insmod /tmp/mod.ko 2>/dev/null
+                rm -f /tmp/mod.ko
+            fi
+            ;;
+        *.xz)
+            if command -v xz >/dev/null 2>&1; then
+                xz -d -c "$mod_path" > /tmp/mod.ko 2>/dev/null && insmod /tmp/mod.ko 2>/dev/null
+                rm -f /tmp/mod.ko
+            fi
+            ;;
+        *.gz)
+            if command -v gunzip >/dev/null 2>&1; then
+                gunzip -c "$mod_path" > /tmp/mod.ko 2>/dev/null && insmod /tmp/mod.ko 2>/dev/null
+                rm -f /tmp/mod.ko
+            fi
+            ;;
+        *.ko)
+            insmod "$mod_path" 2>/dev/null
+            ;;
+    esac
+}
+
+# Load virtio_net dependencies first, then virtio_net
+load_module "failover"
+load_module "net_failover"
+load_module "virtio_net"
+
+# Wait a moment for the network interface to appear
+sleep 0.2
 
 # Source runtime-injected environment variables first
 # These include CHECKER_GUEST_IP, CHECKER_GATEWAY, CHECKER_API_URL, CHECKER_JOB_ID
@@ -111,6 +215,8 @@ if [ -n "$CHECKER_GUEST_IP" ] && [ -n "$CHECKER_GATEWAY" ] && [ -n "$NETIF" ]; t
     echo "nameserver 2001:4860:4860::8888" > /etc/resolv.conf
     echo "nameserver 8.8.8.8" >> /etc/resolv.conf
     echo "Network configured: $CHECKER_GUEST_IP via $CHECKER_GATEWAY on $NETIF"
+else
+    echo "Warning: Network not configured (NETIF=$NETIF, GUEST_IP=$CHECKER_GUEST_IP)"
 fi
 
 INITEOF
