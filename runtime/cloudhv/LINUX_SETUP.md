@@ -1,0 +1,347 @@
+# Cloud Hypervisor Setup on Linux
+
+Cloud Hypervisor is a modern, open-source virtual machine monitor (VMM) written in Rust that uses KVM to create and manage VMs. It requires a Linux host with KVM enabled.
+
+## Prerequisites
+
+### 1. Hardware Requirements
+
+- x86_64 or aarch64 processor with virtualization support
+- KVM enabled (check with `ls /dev/kvm`)
+
+### 2. Install Cloud Hypervisor
+
+```bash
+# Download latest Cloud Hypervisor release
+ARCH=$(uname -m)
+CHV_VERSION="v44.0"
+curl -fLo cloud-hypervisor "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CHV_VERSION}/cloud-hypervisor-static"
+
+# Install to PATH
+sudo mv cloud-hypervisor /usr/local/bin/cloud-hypervisor
+sudo chmod +x /usr/local/bin/cloud-hypervisor
+
+# Verify installation
+cloud-hypervisor --version
+```
+
+### 3. Download Kernel
+
+Cloud Hypervisor supports both compressed (bzImage) and uncompressed (vmlinux) kernels:
+
+```bash
+# Download pre-built kernel (hypervisor-fw is also an option for UEFI boot)
+ARCH=$(uname -m)
+curl -fLo vmlinux-6.6 "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v44.0/hypervisor-fw"
+
+# For better compatibility, use a standard Linux kernel:
+curl -fLo vmlinux-5.10.bin "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/x86_64/vmlinux-5.10.223"
+
+# Make it accessible (e.g., /opt/cloud-hypervisor/)
+sudo mkdir -p /opt/cloud-hypervisor
+sudo mv vmlinux-5.10.bin /opt/cloud-hypervisor/
+```
+
+### 4. Install Required Tools for Rootfs Building
+
+```bash
+# Ubuntu/Debian
+sudo apt-get update
+sudo apt-get install -y buildah skopeo umoci e2fsprogs iproute2 jq
+
+# Fedora/RHEL
+sudo dnf install -y buildah skopeo umoci e2fsprogs iproute jq
+```
+
+### 5. KVM Permissions
+
+Cloud Hypervisor needs access to `/dev/kvm`:
+
+```bash
+# Add your user to the kvm group
+sudo usermod -aG kvm $USER
+
+# Or set permissions on /dev/kvm
+sudo chmod 666 /dev/kvm
+
+# Verify access
+ls -la /dev/kvm
+```
+
+## Network Setup (IPv6)
+
+Cloud Hypervisor VMs use TAP devices attached to a host bridge for networking. This setup uses IPv6-only networking with addresses automatically derived from execution IDs, providing virtually unlimited unique addresses.
+
+### Network Architecture
+
+- **Bridge IP**: `fdcd::1` (gateway for all VMs)
+- **Guest IPs**: `fdcd:<execution_id>` (auto-derived, unique per VM)
+- **Prefix**: `fdcd::/16` (~2^112 addresses)
+
+Note: Uses `fdcd::` prefix to avoid conflicts with Firecracker's `fdfc::` prefix.
+
+### 1. Create Network Bridge (One-Time Setup)
+
+```bash
+# Create bridge with IPv6
+sudo ip link add chvbr0 type bridge
+sudo ip link set chvbr0 up
+
+# Disable DAD (Duplicate Address Detection) to avoid "tentative" address state
+# This is needed because the bridge has no carrier until a TAP device is attached
+sudo sysctl -w net.ipv6.conf.chvbr0.accept_dad=0
+sudo sysctl -w net.ipv6.conf.chvbr0.dad_transmits=0
+
+# Add IPv6 address
+sudo ip -6 addr add fdcd::1/16 dev chvbr0
+
+# Enable IPv6 forwarding
+echo 1 | sudo tee /proc/sys/net/ipv6/conf/all/forwarding
+
+# Make settings persistent (add to /etc/sysctl.conf)
+cat << 'EOF' | sudo tee -a /etc/sysctl.conf
+net.ipv6.conf.all.forwarding = 1
+net.ipv6.conf.chvbr0.accept_dad = 0
+net.ipv6.conf.chvbr0.dad_transmits = 0
+EOF
+```
+
+### 2. Configure NAT for Internet Access
+
+```bash
+# Enable masquerading for the Cloud Hypervisor network (IPv6)
+sudo ip6tables -t nat -A POSTROUTING -s fdcd::/16 ! -o chvbr0 -j MASQUERADE
+
+# Allow forwarding to/from the bridge
+sudo ip6tables -A FORWARD -i chvbr0 -j ACCEPT
+sudo ip6tables -A FORWARD -o chvbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+```
+
+To make ip6tables rules persistent:
+
+```bash
+# Ubuntu/Debian
+sudo apt-get install -y iptables-persistent
+sudo netfilter-persistent save
+
+# Fedora/RHEL
+sudo dnf install -y iptables-services
+sudo service ip6tables save
+```
+
+### 3. Verify Network Setup
+
+```bash
+# Check bridge exists
+ip link show chvbr0
+
+# Check IPv6 address
+ip -6 addr show chvbr0
+
+# Check ip6tables rules
+sudo ip6tables -t nat -L POSTROUTING -n -v
+sudo ip6tables -L FORWARD -n -v
+```
+
+## Building Rootfs from Docker Images
+
+Use the `scripts/build-chv-rootfs.sh` script to convert Docker images to Cloud Hypervisor-compatible raw rootfs:
+
+```bash
+# Build rootfs from a Dockerfile
+./scripts/build-chv-rootfs.sh demo/Dockerfile.checkpoint_restore /path/to/output.raw
+
+# The script:
+# 1. Builds the Docker image using buildah
+# 2. Extracts the image to an OCI bundle
+# 3. Creates an /init script that configures IPv6 networking from env vars
+# 4. Packages everything into an ext4 filesystem (raw format)
+```
+
+### Rootfs Requirements
+
+The rootfs must have an `/init` script that:
+1. Mounts essential filesystems (proc, sys, dev)
+2. Sources `/etc/checker.env` for runtime configuration
+3. Configures IPv6 networking from `CHECKER_GUEST_IP` and `CHECKER_GATEWAY`
+4. Runs the container's entrypoint
+
+Example `/init` script (generated by build-chv-rootfs.sh):
+
+```bash
+#!/bin/sh
+# Mount essential filesystems
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev 2>/dev/null || true
+
+# Set up PATH
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Source runtime-injected environment variables
+# Includes: CHECKER_GUEST_IP, CHECKER_GATEWAY, CHECKER_API_URL, CHECKER_JOB_ID
+if [ -f /etc/checker.env ]; then
+    . /etc/checker.env
+fi
+
+# Configure IPv6 networking
+# Cloud Hypervisor may use eth0, enp0s3, or ens3 depending on the driver
+NETIF=""
+for iface in eth0 enp0s3 ens3; do
+    if ip link show "$iface" >/dev/null 2>&1; then
+        NETIF="$iface"
+        break
+    fi
+done
+
+if [ -n "$CHECKER_GUEST_IP" ] && [ -n "$CHECKER_GATEWAY" ] && [ -n "$NETIF" ]; then
+    ip link set "$NETIF" up
+    ip -6 addr add "$CHECKER_GUEST_IP" dev "$NETIF"
+    ip -6 route add default via "$CHECKER_GATEWAY"
+    echo "nameserver 2001:4860:4860::8888" > /etc/resolv.conf
+fi
+
+# Run the container's entrypoint
+cd /app
+exec node checkpoint_restore_worker.js
+
+# Shutdown on exit
+reboot -f
+```
+
+## Configuration
+
+### NetworkConfig Fields
+
+| Field | Required | Description | Example |
+|-------|----------|-------------|---------|
+| `bridge_name` | Yes | Host bridge to attach TAP device | `"chvbr0"` |
+| `guest_mac` | No | MAC address (auto-generated if empty) | `"AA:BB:CC:DD:EE:FF"` |
+
+Note: `guest_ip` and `guest_gateway` are automatically derived from the execution ID at runtime.
+
+### Example Config
+
+```json
+{
+    "kernel_path": "/opt/cloud-hypervisor/vmlinux-5.10.bin",
+    "rootfs_path": "/path/to/rootfs.raw",
+    "vcpu_count": 2,
+    "mem_size_mib": 512,
+    "network": {
+        "bridge_name": "chvbr0"
+    }
+}
+```
+
+### Runtime-Injected Environment Variables
+
+The following environment variables are injected into `/etc/checker.env` at runtime:
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `CHECKER_API_URL` | Hypervisor API URL | `http://[fdcd::1]:8080` |
+| `CHECKER_JOB_ID` | Job/Execution ID | `job-1234567890-1` |
+| `CHECKER_GUEST_IP` | Guest IPv6 with CIDR (derived from job ID hash) | `fdcd:a1b2:c3d4:e5f6:7890:abcd:ef01:2345/16` |
+| `CHECKER_GATEWAY` | Gateway IPv6 | `fdcd::1` |
+
+## Cloud Hypervisor API
+
+Cloud Hypervisor exposes a REST API via Unix socket. Key endpoints used by the runtime:
+
+| Action | Endpoint | Description |
+|--------|----------|-------------|
+| Create VM | `PUT /api/v1/vm.create` | Create VM with full config |
+| Boot VM | `PUT /api/v1/vm.boot` | Start the VM |
+| Pause VM | `PUT /api/v1/vm.pause` | Pause VM (required before snapshot) |
+| Resume VM | `PUT /api/v1/vm.resume` | Resume paused VM |
+| Snapshot | `PUT /api/v1/vm.snapshot` | Create VM snapshot |
+| Restore | `PUT /api/v1/vm.restore` | Restore from snapshot |
+| Shutdown | `PUT /api/v1/vm.shutdown` | Graceful shutdown |
+
+See [Cloud Hypervisor API Documentation](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/main/docs/api.md) for details.
+
+## Running Tests
+
+```bash
+# Set kernel path
+export CHV_KERNEL_PATH=/opt/cloud-hypervisor/vmlinux-5.10.bin
+
+# Run Cloud Hypervisor tests
+go test -v -run TestCloudHypervisor ./...
+
+# Run with network bridge configured
+# (requires chvbr0 bridge to be set up with IPv6)
+go test -v -run TestCloudHypervisorNetwork ./...
+```
+
+## Troubleshooting
+
+### "cloud-hypervisor not found"
+
+Ensure cloud-hypervisor is in your PATH:
+
+```bash
+which cloud-hypervisor
+# If not found, add to PATH or install
+```
+
+### "Cannot open /dev/kvm"
+
+Check KVM permissions:
+
+```bash
+ls -la /dev/kvm
+# Should be readable/writable by your user or kvm group
+```
+
+### Network not working in VM
+
+1. Verify bridge exists: `ip link show chvbr0`
+2. Verify bridge has IPv6: `ip -6 addr show chvbr0`
+3. Verify TAP device is created: `ip link show chv-*`
+4. Check TAP is attached to bridge: `bridge link show`
+5. Verify IPv6 forwarding: `cat /proc/sys/net/ipv6/conf/all/forwarding` (should be 1)
+6. Check ip6tables NAT rules: `sudo ip6tables -t nat -L -n -v`
+
+### VM starts but no network connectivity
+
+The guest `/init` script must configure networking. Check that:
+1. `/etc/checker.env` is sourced before network setup
+2. `CHECKER_GUEST_IP` and `CHECKER_GATEWAY` are set
+3. The correct network interface is detected (eth0, enp0s3, or ens3)
+4. `ip -6 addr add` and `ip -6 route add` are using these variables
+5. DNS is configured (`/etc/resolv.conf`)
+
+### Snapshot restore fails with network
+
+When restoring from snapshot with networking:
+1. The TAP device is recreated with the same name
+2. The guest network config is preserved in the snapshot (no reconfiguration needed)
+3. The guest wakes up with its IPv6 already configured
+
+### API socket errors
+
+Cloud Hypervisor uses `--api-socket path=/path/to/socket` format (not just `--api-socket /path/to/socket`):
+
+```bash
+# Correct
+cloud-hypervisor --api-socket path=/tmp/chv.sock
+
+# Incorrect
+cloud-hypervisor --api-socket /tmp/chv.sock
+```
+
+## Security Considerations
+
+- Cloud Hypervisor VMs run with reduced privileges using seccomp and namespace isolation
+- TAP devices require root or CAP_NET_ADMIN capability to create
+- Consider using a dedicated network namespace for additional isolation
+- The host bridge exposes the hypervisor API to VMs - ensure proper authentication
+- IPv6 ULA addresses (fdcd::/16) are not globally routable
+
+## References
+
+- [Cloud Hypervisor Documentation](https://github.com/cloud-hypervisor/cloud-hypervisor/tree/main/docs)
+- [Cloud Hypervisor API](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/main/docs/api.md)
+- [Cloud Hypervisor Releases](https://github.com/cloud-hypervisor/cloud-hypervisor/releases)

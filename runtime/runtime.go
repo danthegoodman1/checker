@@ -9,10 +9,9 @@ import (
 type RuntimeType string
 
 const (
-	RuntimeTypePodman      RuntimeType = "podman"
-	RuntimeTypeFirecracker RuntimeType = "firecracker"
-	// Future runtime types:
-	// RuntimeTypeBubblewrap RuntimeType = "bubblewrap"
+	RuntimeTypePodman          RuntimeType = "podman"
+	RuntimeTypeFirecracker     RuntimeType = "firecracker"
+	RuntimeTypeCloudHypervisor RuntimeType = "cloud-hypervisor"
 )
 
 // Checkpoint holds the data needed to restore a process.
