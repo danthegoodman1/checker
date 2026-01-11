@@ -25,24 +25,26 @@ sudo chmod +x /usr/local/bin/cloud-hypervisor
 cloud-hypervisor --version
 ```
 
-### 3. Download Firmware (hypervisor-fw)
+### 3. Install Kernel with Virtio Drivers
 
-Cloud Hypervisor uses **hypervisor-fw**, a minimal UEFI-like firmware that includes
-a built-in Linux kernel with all virtio drivers (virtio-blk, virtio-net, etc.).
+Cloud Hypervisor requires a Linux kernel with **virtio drivers** (virtio-blk, virtio-net).
+The easiest option is to use Ubuntu's virtual kernel package:
 
 ```bash
-# Download hypervisor-fw from Cloud Hypervisor releases
-CHV_VERSION="v50.0"
-curl -fLo hypervisor-fw "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CHV_VERSION}/hypervisor-fw"
+# Install Ubuntu's virtual kernel (has all virtio drivers)
+sudo apt-get update
+sudo apt-get install -y linux-image-virtual
 
-# Make it accessible
-sudo mkdir -p /opt/cloud-hypervisor
-sudo mv hypervisor-fw /opt/cloud-hypervisor/
-sudo chmod +x /opt/cloud-hypervisor/hypervisor-fw
+# Find the installed kernel
+ls /boot/vmlinuz-*-virtual
+# Example output: /boot/vmlinuz-6.8.0-51-virtual
+
+# Set the kernel path for tests
+export CHV_KERNEL_PATH=/boot/vmlinuz-6.8.0-51-virtual
 ```
 
-**Note**: Do NOT use the Firecracker kernel - it lacks virtio drivers.
-The hypervisor-fw firmware is the recommended approach as it includes everything needed.
+**Note**: Do NOT use the Firecracker kernel (`vmlinux-5.10.223` from S3).
+Firecracker uses custom device drivers, while Cloud Hypervisor uses standard virtio.
 
 ### 4. Install Required Tools for Rootfs Building
 
@@ -226,7 +228,7 @@ Note: `guest_ip` and `guest_gateway` are automatically derived from the executio
 
 ```json
 {
-    "firmware_path": "/opt/cloud-hypervisor/hypervisor-fw",
+    "kernel_path": "/boot/vmlinuz-6.8.0-51-virtual",
     "rootfs_path": "/path/to/rootfs.raw",
     "vcpu_count": 2,
     "mem_size_mib": 512,

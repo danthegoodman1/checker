@@ -77,11 +77,12 @@ func GenerateMAC() (string, error) {
 
 // Config holds the configuration for a Cloud Hypervisor runtime execution.
 type Config struct {
-	// FirmwarePath is the path to the hypervisor-fw firmware.
-	// Required. Download from Cloud Hypervisor releases:
-	// https://github.com/cloud-hypervisor/cloud-hypervisor/releases
-	// The firmware includes a built-in kernel with virtio drivers.
-	FirmwarePath string `json:"firmware_path" validate:"required"`
+	// KernelPath is the path to a Linux kernel with virtio drivers.
+	// Required. Use a kernel with virtio-blk, virtio-net support.
+	// Ubuntu's linux-image-virtual package provides a suitable kernel.
+	// Install with: apt-get install linux-image-virtual
+	// Then use: /boot/vmlinuz-*-virtual
+	KernelPath string `json:"kernel_path" validate:"required"`
 
 	// RootfsPath is the path to the root filesystem image (raw or qcow2).
 	// Required. The rootfs should have an /init script that runs the workload.
