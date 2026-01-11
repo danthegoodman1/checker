@@ -14,7 +14,7 @@ Cloud Hypervisor is a modern, open-source virtual machine monitor (VMM) written 
 ```bash
 # Download latest Cloud Hypervisor release
 ARCH=$(uname -m)
-CHV_VERSION="v44.0"
+CHV_VERSION="v50.0"
 curl -fLo cloud-hypervisor "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CHV_VERSION}/cloud-hypervisor-static"
 
 # Install to PATH
