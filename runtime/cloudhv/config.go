@@ -137,8 +137,9 @@ func (c *Config) WithDefaults() *Config {
 		cfg.MemSizeMib = 512
 	}
 	if cfg.Cmdline == "" {
-		// Cloud Hypervisor kernel command line optimized for fast boot
-		cfg.Cmdline = "console=ttyS0 console=hvc0 root=/dev/vda rw init=/init nomodule audit=0 tsc=reliable no_timer_check noreplace-smp random.trust_cpu=on"
+		// Cloud Hypervisor kernel command line
+		// Note: Don't use 'nomodule' - Ubuntu kernels need to load virtio-net as a module
+		cfg.Cmdline = "console=ttyS0 console=hvc0 root=/dev/vda rw init=/init audit=0 tsc=reliable no_timer_check noreplace-smp random.trust_cpu=on"
 	}
 	if cfg.Console == "" {
 		cfg.Console = "tty"
