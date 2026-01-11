@@ -28,7 +28,10 @@ import (
 // - CHV_BRIDGE_NAME: Name of the bridge for TAP networking (default: chvbr0)
 // - PG_DSN: PostgreSQL connection string (required for hypervisor tests)
 //
-// Before running tests, set up the network bridge (IPv6):
+// Before running tests, set up the network bridge (IPv6).
+// IMPORTANT: DAD must be disabled BEFORE adding the IPv6 address, otherwise the
+// address gets stuck in "tentative" state and cannot be bound to.
+//
 //   sudo ip link add chvbr0 type bridge
 //   sudo ip link set chvbr0 up
 //   sudo sysctl -w net.ipv6.conf.chvbr0.accept_dad=0
@@ -67,11 +70,15 @@ func getCloudHypervisorTestConfig(t *testing.T) (kernelPath, bridgeName string) 
 	if err := cmd.Run(); err != nil {
 		t.Skipf("Bridge %s not found. Set up with:\n"+
 			"  sudo ip link add %s type bridge\n"+
-			"  sudo ip -6 addr add fdcd::1/16 dev %s\n"+
 			"  sudo ip link set %s up\n"+
+			"  sudo sysctl -w net.ipv6.conf.%s.accept_dad=0\n"+
+			"  sudo sysctl -w net.ipv6.conf.%s.dad_transmits=0\n"+
+			"  sudo ip -6 addr add fdcd::1/16 dev %s\n"+
 			"  echo 1 | sudo tee /proc/sys/net/ipv6/conf/all/forwarding\n"+
-			"  sudo ip6tables -t nat -A POSTROUTING -s fdcd::/16 ! -o %s -j MASQUERADE",
-			bridgeName, bridgeName, bridgeName, bridgeName, bridgeName)
+			"  sudo ip6tables -t nat -A POSTROUTING -s fdcd::/16 ! -o %s -j MASQUERADE\n"+
+			"  sudo ip6tables -A FORWARD -i %s -j ACCEPT\n"+
+			"  sudo ip6tables -A FORWARD -o %s -m state --state RELATED,ESTABLISHED -j ACCEPT",
+			bridgeName, bridgeName, bridgeName, bridgeName, bridgeName, bridgeName, bridgeName, bridgeName, bridgeName)
 	}
 
 	// Verify bridge has IPv6 address fdcd::1
@@ -79,8 +86,10 @@ func getCloudHypervisorTestConfig(t *testing.T) (kernelPath, bridgeName string) 
 	output, err := cmd.Output()
 	if err != nil || !strings.Contains(string(output), "fdcd::1") {
 		t.Skipf("Bridge %s does not have IPv6 address fdcd::1. Set up with:\n"+
+			"  sudo sysctl -w net.ipv6.conf.%s.accept_dad=0\n"+
+			"  sudo sysctl -w net.ipv6.conf.%s.dad_transmits=0\n"+
 			"  sudo ip -6 addr add fdcd::1/16 dev %s",
-			bridgeName, bridgeName)
+			bridgeName, bridgeName, bridgeName, bridgeName)
 	}
 
 	return kernelPath, bridgeName
